@@ -1,0 +1,263 @@
+// addsegmentsdialog.cpp
+#include "addsegmentsdialog.h"
+#include "ui_addsegmentsdialog.h"
+
+// --- Qt Includes ---
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QFormLayout>
+#include <QGroupBox>
+#include <QLabel>
+#include <QLineEdit>
+#include <QDoubleSpinBox>
+#include <QComboBox>
+#include <QPushButton>
+#include <QTableWidget>
+#include <QTableWidgetItem>
+#include <QHeaderView>
+#include <QMessageBox>
+#include <QScrollArea>
+#include <QApplication>
+#include <QMetaObject> // Обычно не обязателен для connect и QOverload
+
+// --- Std Includes ---
+#include <vector>
+#include <memory>
+#include <string>
+
+// --- Your Includes ---
+#include "trajectoryconfig.h" // Для MotionType, TrajectorySegment, GeoPosition, Vector3
+
+// Конструктор
+AddSegmentsDialog::AddSegmentsDialog(QWidget *parent)
+    : QDialog(parent)
+    , ui(new Ui::AddSegmentsDialog)
+{
+    ui->setupUi(this);
+
+    // Устанавливаем начальные значения для координат и шага времени в виджетах .ui
+    // Предположим, что в .ui файле есть doubleSpinBoxLat, doubleSpinBoxLon, doubleSpinBoxAlt, doubleSpinBoxStep
+    // ui->doubleSpinBoxLat->setValue(55.7558);
+    // ui->doubleSpinBoxLon->setValue(37.6173);
+    // ui->doubleSpinBoxAlt->setValue(150.0);
+    // ui->doubleSpinBoxStep->setValue(0.1);
+    // Пока оставим пустым, если в .ui файле уже установлены значения
+}
+
+// Деструктор
+AddSegmentsDialog::~AddSegmentsDialog()
+{
+    // Освобождаем память для всех созданных динамически виджетов сегментов
+    // qDeleteAll(segmentWidgetsList); // Удаление через deleteLater() в лямбде
+    // Удаляем структуры SegmentWidgets
+    qDeleteAll(segmentWidgetsList);
+    delete ui;
+}
+
+// --- Слоты ---
+
+void AddSegmentsDialog::on_btnAddSegment_clicked()
+{
+    SegmentWidgets* widgets = createSegmentWidgets();
+    if (widgets) {
+        // Добавляем контейнер сегмента в основной layout из .ui файла
+        ui->verticalLayoutSegments->addWidget(widgets->container); // <-- OK: verticalLayoutSegments - это QLayout
+        // Сохраняем указатель на структуру
+        segmentWidgetsList.append(widgets);
+        // Инициализируем видимость полей
+        updateSegmentFields(widgets);
+    }
+}
+
+void AddSegmentsDialog::on_btnSave_clicked()
+{
+    if (segmentWidgetsList.isEmpty()) { // <-- OK: isEmpty() - метод QList
+        QMessageBox::information(this, tr("Информация"), tr("Добавьте хотя бы один сегмент."));
+        return;
+    }
+    accept(); // QDialog::Accepted из exec()
+}
+
+void AddSegmentsDialog::on_btnCancel_clicked()
+{
+    reject(); // QDialog::Rejected из exec()
+}
+
+// --- Вспомогательные функции ---
+
+AddSegmentsDialog::SegmentWidgets* AddSegmentsDialog::createSegmentWidgets()
+{
+    auto* widgets = new SegmentWidgets;
+
+    // 1. Создаём контейнер (например, QGroupBox)
+    widgets->container = new QGroupBox(tr("Сегмент"));
+    auto* layout = new QFormLayout(widgets->container); // <-- OK: layout - это QLayout
+
+    // 2. Создаём и добавляем виджеты в макет контейнера
+    widgets->typeCombo = new QComboBox();
+    // Используем enum MotionType из Imimi.txt (UNIFORM = 0, ACCELERATED = 1, CIRCULAR = 2)
+    // Убедитесь, что строки соответствуют enum MotionType
+    widgets->typeCombo->addItems({tr("Равномерное"), tr("Равноускоренное"), tr("Круговое")});
+    layout->addRow(tr("Тип движения:"), widgets->typeCombo); // <-- OK: layout - это QLayout
+
+    widgets->durationSpin = new QDoubleSpinBox();
+    widgets->durationSpin->setRange(0.0, 1000.0);
+    widgets->durationSpin->setValue(5.0);
+    layout->addRow(tr("Длительность (с):"), widgets->durationSpin); // <-- OK: layout - это QLayout
+
+    // Поля для начальной позиции
+    auto* posLayout = new QHBoxLayout(); // Макет для X, Y, Z
+    widgets->posXStart = new QDoubleSpinBox(); widgets->posXStart->setRange(-1000000.0, 1000000.0);
+    widgets->posYStart = new QDoubleSpinBox(); widgets->posYStart->setRange(-1000000.0, 1000000.0);
+    widgets->posZStart = new QDoubleSpinBox(); widgets->posZStart->setRange(-1000000.0, 1000000.0);
+    posLayout->addWidget(widgets->posXStart); posLayout->addWidget(widgets->posYStart); posLayout->addWidget(widgets->posZStart);
+    layout->addRow(tr("Нач. позиция (X,Y,Z):"), posLayout); // <-- OK: layout - это QLayout
+
+    // Поля для начальной скорости
+    auto* velLayout = new QHBoxLayout();
+    widgets->velXStart = new QDoubleSpinBox(); widgets->velXStart->setRange(-10000.0, 10000.0);
+    widgets->velYStart = new QDoubleSpinBox(); widgets->velYStart->setRange(-10000.0, 10000.0);
+    widgets->velZStart = new QDoubleSpinBox(); widgets->velZStart->setRange(-10000.0, 10000.0);
+    velLayout->addWidget(widgets->velXStart); velLayout->addWidget(widgets->velYStart); velLayout->addWidget(widgets->velZStart);
+    layout->addRow(tr("Нач. скорость (X,Y,Z):"), velLayout); // <-- OK: layout - это QLayout
+
+    // Поля для ускорения (для ACCELERATED)
+    auto* accLayout = new QHBoxLayout();
+    widgets->accX = new QDoubleSpinBox(); widgets->accX->setRange(-1000.0, 1000.0);
+    widgets->accY = new QDoubleSpinBox(); widgets->accY->setRange(-1000.0, 1000.0);
+    widgets->accZ = new QDoubleSpinBox(); widgets->accZ->setRange(-1000.0, 1000.0);
+    accLayout->addWidget(widgets->accX); accLayout->addWidget(widgets->accY); accLayout->addWidget(widgets->accZ);
+    layout->addRow(tr("Ускорение (X,Y,Z):"), accLayout); // <-- OK: layout - это QLayout
+    accLayout->parentWidget()->setVisible(false); // Скрывает строку с лейблом и лейаутом
+
+    // Поля для центра окружности (для CIRCULAR)
+    auto* centerLayout = new QHBoxLayout();
+    widgets->centerX = new QDoubleSpinBox(); widgets->centerX->setRange(-1000000.0, 1000000.0);
+    widgets->centerY = new QDoubleSpinBox(); widgets->centerY->setRange(-1000000.0, 1000000.0);
+    widgets->centerZ = new QDoubleSpinBox(); widgets->centerZ->setRange(-1000000.0, 1000000.0);
+    centerLayout->addWidget(widgets->centerX); centerLayout->addWidget(widgets->centerY); centerLayout->addWidget(widgets->centerZ);
+    layout->addRow(tr("Центр окр. (X,Y,Z):"), centerLayout); // <-- OK: layout - это QLayout
+    centerLayout->parentWidget()->setVisible(false); // Скрывает строку
+
+    // Поле для радиуса (для CIRCULAR)
+    widgets->radiusSpin = new QDoubleSpinBox();
+    widgets->radiusSpin->setRange(0.0, 10000.0); widgets->radiusSpin->setValue(5.0);
+    layout->addRow(tr("Радиус (м):"), widgets->radiusSpin); // <-- OK: layout - это QLayout
+    widgets->radiusSpin->setVisible(false); // Скрывает виджет
+
+    // Поле для угловой скорости (для CIRCULAR)
+    widgets->angVelSpin = new QDoubleSpinBox();
+    widgets->angVelSpin->setRange(-100.0, 100.0); widgets->angVelSpin->setValue(1.0);
+    layout->addRow(tr("Угл. скорость (рад/с):"), widgets->angVelSpin); // <-- OK: layout - это QLayout
+    widgets->angVelSpin->setVisible(false); // Скрывает виджет
+
+    // Кнопка удаления
+    widgets->removeButton = new QPushButton(tr("Удалить"));
+    layout->addRow(widgets->removeButton); // <-- OK: layout - это QLayout
+
+    // --- ПРАВИЛЬНЫЙ connect для кнопки удаления ---
+    // Соединяем сигнал clicked кнопки удаления
+    connect(widgets->removeButton, &QPushButton::clicked, this, [this, widgets]() { // <-- ВАЖНО: [this, widgets]
+        int index = segmentWidgetsList.indexOf(widgets);
+        if (index != -1) {
+            // --- ПРАВИЛЬНО: вызываем removeWidget у макета ---
+            ui->verticalLayoutSegments->removeWidget(widgets->container); // <-- OK: verticalLayoutSegments - это QLayout
+            segmentWidgetsList.removeAt(index); // <-- OK: removeAt - метод QList
+            // --- ПРАВИЛЬНО: помечаем контейнер для удаления ---
+            widgets->container->deleteLater(); // deleteLater() безопаснее, чем delete
+            // --- ПРАВИЛЬНО: удаляем структуру ---
+            delete widgets; // Удаляем структуру
+        }
+    });
+
+    // --- ПРАВИЛЬНЫЙ connect для QComboBox ---
+    // Соединяем сигнал изменения типа движения с обновлением полей
+    // Используем QOverload для перегруженного сигнала currentIndexChanged(int)
+    connect(widgets->typeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this, widgets](int index) { // <-- ВАЖНО: [this, widgets] захватывает widgets по значению
+        updateSegmentFields(widgets); // <-- вызываем метод this->updateSegmentFields
+    });
+
+    // Инициализируем видимость полей
+    // updateSegmentFields(widgets); // Вызывается в on_btnAddSegment_clicked или сразу после создания
+
+    return widgets;
+}
+
+void AddSegmentsDialog::updateSegmentFields(SegmentWidgets* widgets)
+{
+    if (!widgets) return;
+
+    // Получаем текущий индекс типа движения
+    int typeIndex = widgets->typeCombo->currentIndex();
+
+    // Скрываем все специфичные поля
+    widgets->accX->parentWidget()->setVisible(false); // QHBoxLayout для acc
+    widgets->centerX->parentWidget()->setVisible(false); // QHBoxLayout для center
+    widgets->radiusSpin->setVisible(false);
+    widgets->angVelSpin->setVisible(false);
+
+    // Показываем нужные в зависимости от типа
+    switch (typeIndex) {
+        case 1: // ACCELERATED (индекс 1)
+            widgets->accX->parentWidget()->setVisible(true);
+            break;
+        case 2: // CIRCULAR (индекс 2)
+            widgets->centerX->parentWidget()->setVisible(true);
+            widgets->radiusSpin->setVisible(true);
+            widgets->angVelSpin->setVisible(true);
+            break;
+        case 0: // UNIFORM (индекс 0) - не требует дополнительных полей
+        default:
+            break;
+    }
+}
+
+// --- Геттеры ---
+
+std::vector<TrajectorySegment> AddSegmentsDialog::getSegments() const
+{
+    std::vector<TrajectorySegment> result;
+    for (const auto* widgets : segmentWidgetsList) { // <-- OK: segmentWidgetsList - это QList
+        // --- ПРАВИЛЬНО: создаём сегмент с конструктором ---
+        // Используем enum MotionType из Imimi.txt
+        TrajectorySegment seg(
+            static_cast<MotionType>(widgets->typeCombo->currentIndex()), // MotionType
+            widgets->durationSpin->value()                              // double
+            // Vector3() будет использован по умолчанию для start_position
+        );
+
+        // Заполняем общие поля
+        seg.start_position = Vector3(widgets->posXStart->value(), widgets->posYStart->value(), widgets->posZStart->value());
+        seg.start_velocity = Vector3(widgets->velXStart->value(), widgets->velYStart->value(), widgets->velZStart->value());
+
+        // Заполняем специфичные поля в зависимости от типа
+        if (seg.type == MotionType::ACCELERATED) {
+            seg.acceleration = Vector3(widgets->accX->value(), widgets->accY->value(), widgets->accZ->value());
+        } else if (seg.type == MotionType::CIRCULAR) {
+            seg.center = Vector3(widgets->centerX->value(), widgets->centerY->value(), widgets->centerZ->value());
+            seg.radius = widgets->radiusSpin->value();
+            seg.angular_velocity = widgets->angVelSpin->value();
+        }
+        // Для UNIFORM не заполняем специфичные поля
+
+        result.push_back(seg);
+    }
+    return result;
+}
+
+GeoPosition AddSegmentsDialog::getStartGeoPosition() const
+{
+    // Считываем значения из соответствующих виджетов в .ui файле
+    // Пример: return GeoPosition(ui->doubleSpinBoxLat->value(), ui->doubleSpinBoxLon->value(), ui->doubleSpinBoxAlt->value());
+    // Пока возвращаем значение по умолчанию.
+    return GeoPosition(55.7558, 37.6173, 150.0); // Пример: Москва
+}
+
+double AddSegmentsDialog::getTimeStep() const
+{
+    // Считываем значение из соответствующего виджета в .ui файле
+    // Пример: return ui->doubleSpinBoxStep->value();
+    // Пока возвращаем значение по умолчанию.
+    return 0.1;
+}
