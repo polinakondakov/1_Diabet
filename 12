@@ -1,0 +1,230 @@
+#include "StraightSegment3D.h"
+#include "SnakeSegment3D.h"
+#include "CircleSegment3D.h"
+#include "SmoothTurn3D.h"
+
+void TrajectoryGenerator::addStraight3D(double duration, Vector3 start_pos, Vector3 start_vel, Vector3 acc, double angle) {
+    config.segments.push_back(make_shared<StraightSegment3D>(duration, start_pos, start_vel, acc, angle));
+}
+
+void TrajectoryGenerator::addSnake3D(double duration, Vector3 start_pos, double forward_vel, double amplitude, double frequency) {
+    config.segments.push_back(make_shared<SnakeSegment3D>(duration, start_pos, forward_vel, amplitude, frequency));
+}
+
+void TrajectoryGenerator::addCircle3D(double duration, Vector3 center, double radius, double angular_vel, double start_angle) {
+    config.segments.push_back(make_shared<CircleSegment3D>(duration, center, radius, angular_vel, start_angle));
+}
+
+vector<TrajectoryPoint> TrajectoryGenerator::buildWithSmoothing(double max_normal_acc) {
+    if (config.witch_from) {
+        return loadFromFile(config.file_path);
+    }
+    
+    vector<TrajectoryPoint> trajectory;
+    double current_time = 0;
+    Vector3 current_pos(0, 0, 0);   // абсолютная позиция
+    Vector3 current_vel(0, 0, 0);   // текущая скорость
+    
+    for (size_t i = 0; i < config.segments.size(); i++) {
+        auto& seg = config.segments[i];
+        double duration = seg->duration;
+        
+        // Генерация точек сегмента
+        for (double t = 0; t <= duration; t += config.time_step) {
+            TrajectoryPoint point(current_time + t);
+            
+            // Абсолютная позиция
+            point.position = current_pos + seg->position(t);
+            point.velocity = seg->velocity(t);
+            point.acceleration = seg->acceleration(t);
+            point.orientation = seg->orientation(t);
+            point.angular_velocity = seg->angular_velocity(t);
+            
+            point.geo_position = cartesianToGeo(point.position);
+            trajectory.push_back(point);
+        }
+        
+        // Сохраняем конечную скорость
+        current_vel = seg->velocity(duration);
+        current_pos = current_pos + seg->position(duration);
+        current_time += duration;
+        
+        // Плавный поворот к следующему сегменту
+        if (i < config.segments.size() - 1) {
+            Vector3 nextStartVel = config.segments[i + 1]->velocity(0);
+            
+            SmoothTurn3D turn(current_vel, nextStartVel, 1.0, max_normal_acc);
+            
+            for (double t = config.time_step; t <= turn.duration; t += config.time_step) {
+                TrajectoryPoint point(current_time + t);
+                point.velocity = turn.getVel(t);
+                point.position = trajectory.back().position + point.velocity * config.time_step;
+                point.geo_position = cartesianToGeo(point.position);
+                trajectory.push_back(point);
+            }
+            
+            current_time += turn.duration;
+            current_pos = trajectory.back().position;
+            current_vel = turn.getVel(turn.duration);
+        }
+    }
+    
+    return trajectory;
+
+
+
+#include "trajectory/TrajectoryGenerator.h"
+#include "trajectory/StraightSegment3D.h"
+#include "trajectory/SnakeSegment3D.h"
+#include "trajectory/CircleSegment3D.h"
+#include "sensors/Accelerometer.h"
+#include <vector>
+#include <iostream>
+#include <fstream>
+#include <cmath>
+
+using namespace std;
+
+const double PI = 3.141592653589793;
+
+int main() {
+    cout << "=== MOTION SENSORS SIMULATOR ===" << endl;
+
+    TrajectoryConfig config;
+
+    cout << "1 - Analytical, 2 - From file: ";
+    int mode; cin >> mode;
+    config.witch_from = (mode == 2);
+
+    if (!config.witch_from) {
+        cout << "Time step (sec): "; cin >> config.time_step;
+        cout << "Start lat: "; cin >> config.start_geo_position.latitude;
+        cout << "Start lon: "; cin >> config.start_geo_position.longitude;
+        cout << "Start alt: "; cin >> config.start_geo_position.altitude;
+
+        // Начальные параметры движения
+        double start_speed, start_angle_deg, start_acc;
+        cout << "Start speed (m/s): "; cin >> start_speed;
+        cout << "Start angle (degrees, 0=east, 90=north): "; cin >> start_angle_deg;
+        cout << "Start acceleration (m/s²): "; cin >> start_acc;
+        
+        double start_angle_rad = start_angle_deg * PI / 180.0;
+        
+        Vector3 start_vel(start_speed * cos(start_angle_rad), start_speed * sin(start_angle_rad), 0);
+        Vector3 start_acc_vec(start_acc * cos(start_angle_rad), start_acc * sin(start_angle_rad), 0);
+        
+        cout << "Number of trajectory segments: "; int segs; cin >> segs;
+        
+        Vector3 current_pos(0, 0, 0);
+        Vector3 current_vel = start_vel;
+        double current_abs_angle = start_angle_rad;
+        
+        TrajectoryGenerator generator(config);
+        
+        // Первый сегмент (прямолинейный, 1 секунда) - инициализация
+        generator.addStraight3D(1.0, current_pos, current_vel, start_acc_vec, current_abs_angle * 180.0 / PI);
+        
+        current_pos = current_pos + current_vel * 1.0 + start_acc_vec * 0.5;
+        current_vel = current_vel + start_acc_vec * 1.0;
+        
+        // Добавление остальных сегментов
+        for (int i = 0; i < segs; i++) {
+            cout << "\nSegment " << i + 1 << " type (1=straight, 2=snake, 3=circle): ";
+            int type; cin >> type;
+            
+            if (type == 1) {
+                double dur, acc_mag, turn_angle_deg;
+                cout << "Duration: "; cin >> dur;
+                cout << "Turn angle (degrees, positive=left): "; cin >> turn_angle_deg;
+                cout << "Acceleration magnitude: "; cin >> acc_mag;
+                
+                // Обновляем абсолютный угол
+                current_abs_angle += turn_angle_deg * PI / 180.0;
+                
+                double speed = current_vel.length();
+                Vector3 new_vel(speed * cos(current_abs_angle), speed * sin(current_abs_angle), 0);
+                Vector3 acc_vec(acc_mag * cos(current_abs_angle), acc_mag * sin(current_abs_angle), 0);
+                
+                generator.addStraight3D(dur, current_pos, new_vel, acc_vec, current_abs_angle * 180.0 / PI);
+                
+                current_pos = current_pos + new_vel * dur + acc_vec * (0.5 * dur * dur);
+                current_vel = new_vel + acc_vec * dur;
+            }
+            else if (type == 2) {
+                double dur, vx, A, f;
+                cout << "Duration: "; cin >> dur;
+                cout << "Forward velocity X (m/s): "; cin >> vx;
+                cout << "Amplitude: "; cin >> A;
+                cout << "Frequency: "; cin >> f;
+                
+                generator.addSnake3D(dur, current_pos, vx, A, f);
+                
+                double omega = 2 * PI * f;
+                current_pos = Vector3(current_pos.x + vx * dur, current_pos.y + A * sin(omega * dur), current_pos.z);
+                current_vel = Vector3(vx, A * omega * cos(omega * dur), 0);
+            }
+            else if (type == 3) {
+                double dur, R, w;
+                cout << "Duration: "; cin >> dur;
+                cout << "Radius: "; cin >> R;
+                cout << "Angular velocity (rad/s): "; cin >> w;
+                
+                Vector3 vel_dir = current_vel.normalized();
+                Vector3 perp;
+                if (w > 0) perp = Vector3(-vel_dir.y, vel_dir.x, 0);
+                else perp = Vector3(vel_dir.y, -vel_dir.x, 0);
+                
+                Vector3 center = current_pos + perp * R;
+                double start_angle = atan2(current_pos.y - center.y, current_pos.x - center.x);
+                
+                generator.addCircle3D(dur, center, R, w, start_angle);
+                
+                double end_angle = start_angle + w * dur;
+                current_pos = Vector3(center.x + R * cos(end_angle), center.y + R * sin(end_angle), center.z);
+                current_vel = Vector3(-R * w * sin(end_angle), R * w * cos(end_angle), 0);
+            }
+        }
+        
+        double max_normal_acc;
+        cout << "\nMax normal acceleration for smoothing (m/s²): "; cin >> max_normal_acc;
+        
+        auto trajectory = generator.buildWithSmoothing(max_normal_acc);
+        
+        string filename;
+        cout << "Output filename: "; cin >> filename;
+        
+        ofstream file(filename);
+        file << "Time,PosX,PosY,PosZ,VelX,VelY,VelZ,AccX,AccY,AccZ,AngVelX,AngVelY,AngVelZ,Roll,Pitch,Yaw,Latitude,Longitude,Altitude\n";
+        for (const auto& point : trajectory) {
+            if (point.isValid()) file << point.toCSV() << "\n";
+        }
+        file.close();
+        
+        cout << "Trajectory saved! " << trajectory.size() << " points\n";
+    } else {
+        // Загрузка из файла
+        cout << "File: "; cin >> config.file_path;
+        cout << "Start lat: "; cin >> config.start_geo_position.latitude;
+        cout << "Start lon: "; cin >> config.start_geo_position.longitude;
+        cout << "Start alt: "; cin >> config.start_geo_position.altitude;
+        config.time_step = 0.1;
+        
+        TrajectoryGenerator generator(config);
+        auto trajectory = generator.build();
+        
+        string filename;
+        cout << "Output filename: "; cin >> filename;
+        ofstream file(filename);
+        file << "Time,PosX,PosY,PosZ,VelX,VelY,VelZ,AccX,AccY,AccZ,AngVelX,AngVelY,AngVelZ,Roll,Pitch,Yaw,Latitude,Longitude,Altitude\n";
+        for (const auto& point : trajectory) {
+            if (point.isValid()) file << point.toCSV() << "\n";
+        }
+        file.close();
+        
+        cout << "Trajectory saved! " << trajectory.size() << " points\n";
+    }
+    
+    return 0;
+}
+
+}
