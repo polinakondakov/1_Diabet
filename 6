@@ -1,0 +1,1103 @@
+#pragma once
+#include "Vector3.h"
+#include "GeoPosition.h"
+
+class CoordinateTransforms {
+private:
+    static constexpr double A = 6378137.0;           // большая полуось (м)
+    static constexpr double E2 = 0.00669437999014;   // квадрат эксцентриситета
+    static constexpr double OMEGA = 7.292115e-5;     // угловая скорость Земли (рад/с)
+    static constexpr double PI = 3.141592653589793;
+    
+    GeoPosition origin;
+    double origin_time;
+    bool initialized;
+
+public:
+    CoordinateTransforms();
+    
+    void init(const GeoPosition& start_geo, double time = 0);
+    
+    // Географические ↔ ECEF
+    Vector3 geoToEcef(const GeoPosition& geo) const;
+    GeoPosition ecefToGeo(const Vector3& ecef) const;
+    
+    // ECEF ↔ ECI
+    double getSiderealTime(double time) const;
+    Vector3 ecefToEci(const Vector3& ecef, double time) const;
+    Vector3 eciToEcef(const Vector3& eci, double time) const;
+    
+    // ECEF ↔ ENU
+    Vector3 ecefToEnu(const Vector3& ecef, double lat, double lon) const;
+    Vector3 enuToEcef(const Vector3& enu, double lat, double lon) const;
+    
+    // ENU ↔ Body
+    Vector3 enuToBody(const Vector3& enu, double roll, double pitch, double yaw) const;
+    Vector3 bodyToEnu(const Vector3& body, double roll, double pitch, double yaw) const;
+    
+    // Полные преобразования
+    GeoPosition eciToGeo(const Vector3& eci, double time) const;
+    Vector3 geoToEci(const GeoPosition& geo, double time) const;
+    
+    bool isInitialized() const { return initialized; }
+};#include "CoordinateTransforms.h"
+#include <cmath>
+
+CoordinateTransforms::CoordinateTransforms() : initialized(false), origin_time(0) {}
+
+void CoordinateTransforms::init(const GeoPosition& start_geo, double time) {
+    origin = start_geo;
+    origin_time = time;
+    initialized = true;
+}
+
+// ========== ГЕОГРАФИЧЕСКИЕ ↔ ECEF ==========
+
+Vector3 CoordinateTransforms::geoToEcef(const GeoPosition& geo) const {
+    double lat_rad = geo.latitude * PI / 180.0;
+    double lon_rad = geo.longitude * PI / 180.0;
+    double alt = geo.altitude;
+    
+    double sin_lat = sin(lat_rad);
+    double cos_lat = cos(lat_rad);
+    double cos_lon = cos(lon_rad);
+    double sin_lon = sin(lon_rad);
+    
+    double N = A / sqrt(1.0 - E2 * sin_lat * sin_lat);
+    
+    return Vector3(
+        (N + alt) * cos_lat * cos_lon,
+        (N + alt) * cos_lat * sin_lon,
+        (N * (1.0 - E2) + alt) * sin_lat
+    );
+}
+
+GeoPosition CoordinateTransforms::ecefToGeo(const Vector3& ecef) const {
+    double x = ecef.x, y = ecef.y, z = ecef.z;
+    
+    double lon_rad = atan2(y, x);
+    double p = sqrt(x*x + y*y);
+    double lat_rad = atan2(z, p * (1.0 - E2));
+    
+    double lat_prev;
+    double alt = 0;
+    double N = 0;
+    
+    do {
+        lat_prev = lat_rad;
+        N = A / sqrt(1.0 - E2 * sin(lat_rad) * sin(lat_rad));
+        alt = p / cos(lat_rad) - N;
+        lat_rad = atan2(z, p * (1.0 - E2 * N / (N + alt)));
+    } while (fabs(lat_rad - lat_prev) > 1e-12);
+    
+    N = A / sqrt(1.0 - E2 * sin(lat_rad) * sin(lat_rad));
+    alt = p / cos(lat_rad) - N;
+    
+    if (fabs(alt) < 1e-6) alt = 0;
+    
+    return GeoPosition(lat_rad * 180.0 / PI, lon_rad * 180.0 / PI, alt);
+}
+
+// ========== ECEF ↔ ECI ==========
+
+double CoordinateTransforms::getSiderealTime(double time) const {
+    return OMEGA * (time - origin_time);
+}
+
+Vector3 CoordinateTransforms::ecefToEci(const Vector3& ecef, double time) const {
+    double theta = getSiderealTime(time);
+    double cos_theta = cos(theta);
+    double sin_theta = sin(theta);
+    
+    return Vector3(
+        ecef.x * cos_theta - ecef.y * sin_theta,
+        ecef.x * sin_theta + ecef.y * cos_theta,
+        ecef.z
+    );
+}
+
+Vector3 CoordinateTransforms::eciToEcef(const Vector3& eci, double time) const {
+    double theta = getSiderealTime(time);
+    double cos_theta = cos(theta);
+    double sin_theta = sin(theta);
+    
+    return Vector3(
+        eci.x * cos_theta + eci.y * sin_theta,
+        -eci.x * sin_theta + eci.y * cos_theta,
+        eci.z
+    );
+}
+
+// ========== ECEF ↔ ENU ==========
+
+Vector3 CoordinateTransforms::ecefToEnu(const Vector3& ecef, double lat, double lon) const {
+    double lat_rad = lat * PI / 180.0;
+    double lon_rad = lon * PI / 180.0;
+    
+    double sin_lat = sin(lat_rad);
+    double cos_lat = cos(lat_rad);
+    double sin_lon = sin(lon_rad);
+    double cos_lon = cos(lon_rad);
+    
+    return Vector3(
+        -ecef.x * sin_lon + ecef.y * cos_lon,
+        -ecef.x * sin_lat * cos_lon - ecef.y * sin_lat * sin_lon + ecef.z * cos_lat,
+        ecef.x * cos_lat * cos_lon + ecef.y * cos_lat * sin_lon + ecef.z * sin_lat
+    );
+}
+
+Vector3 CoordinateTransforms::enuToEcef(const Vector3& enu, double lat, double lon) const {
+    double lat_rad = lat * PI / 180.0;
+    double lon_rad = lon * PI / 180.0;
+    
+    double sin_lat = sin(lat_rad);
+    double cos_lat = cos(lat_rad);
+    double sin_lon = sin(lon_rad);
+    double cos_lon = cos(lon_rad);
+    
+    double east = enu.x;
+    double north = enu.y;
+    double up = enu.z;
+    
+    return Vector3(
+        -east * sin_lon - north * sin_lat * cos_lon + up * cos_lat * cos_lon,
+        east * cos_lon - north * sin_lat * sin_lon + up * cos_lat * sin_lon,
+        north * cos_lat + up * sin_lat
+    );
+}
+
+// ========== ENU ↔ BODY ==========
+
+Vector3 CoordinateTransforms::enuToBody(const Vector3& enu, double roll, double pitch, double yaw) const {
+    double phi = roll * PI / 180.0;
+    double theta = pitch * PI / 180.0;
+    double psi = yaw * PI / 180.0;
+    
+    double c_phi = cos(phi), s_phi = sin(phi);
+    double c_theta = cos(theta), s_theta = sin(theta);
+    double c_psi = cos(psi), s_psi = sin(psi);
+    
+    return Vector3(
+        enu.x * (c_theta * c_psi) +
+        enu.y * (c_theta * s_psi) +
+        enu.z * (-s_theta),
+        
+        enu.x * (s_phi * s_theta * c_psi - c_phi * s_psi) +
+        enu.y * (s_phi * s_theta * s_psi + c_phi * c_psi) +
+        enu.z * (s_phi * c_theta),
+        
+        enu.x * (c_phi * s_theta * c_psi + s_phi * s_psi) +
+        enu.y * (c_phi * s_theta * s_psi - s_phi * c_psi) +
+        enu.z * (c_phi * c_theta)
+    );
+}
+
+Vector3 CoordinateTransforms::bodyToEnu(const Vector3& body, double roll, double pitch, double yaw) const {
+    double phi = roll * PI / 180.0;
+    double theta = pitch * PI / 180.0;
+    double psi = yaw * PI / 180.0;
+    
+    double c_phi = cos(phi), s_phi = sin(phi);
+    double c_theta = cos(theta), s_theta = sin(theta);
+    double c_psi = cos(psi), s_psi = sin(psi);
+    
+    double x = body.x, y = body.y, z = body.z;
+    
+    return Vector3(
+        x * (c_theta * c_psi) +
+        y * (s_phi * s_theta * c_psi - c_phi * s_psi) +
+        z * (c_phi * s_theta * c_psi + s_phi * s_psi),
+        
+        x * (c_theta * s_psi) +
+        y * (s_phi * s_theta * s_psi + c_phi * c_psi) +
+        z * (c_phi * s_theta * s_psi - s_phi * c_psi),
+        
+        x * (-s_theta) +
+        y * (s_phi * c_theta) +
+        z * (c_phi * c_theta)
+    );
+}
+
+// ========== ПОЛНЫЕ ПРЕОБРАЗОВАНИЯ ==========
+
+GeoPosition CoordinateTransforms::eciToGeo(const Vector3& eci, double time) const {
+    Vector3 ecef = eciToEcef(eci, time);
+    return ecefToGeo(ecef);
+}
+
+Vector3 CoordinateTransforms::geoToEci(const GeoPosition& geo, double time) const {
+    Vector3 ecef = geoToEcef(geo);
+    return ecefToEci(ecef, time);
+}
+
+#pragma once
+#include "Vector3.h"
+#include "GeoPosition.h"
+#include <string>
+
+struct TrajectoryPoint {
+    double time = 0;
+    
+    // ECI координаты (для физики)
+    Vector3 position_eci;
+    Vector3 velocity_eci;
+    Vector3 acceleration_eci;
+    
+    // Ориентация
+    Vector3 orientation;        // roll, pitch, yaw в градусах
+    Vector3 angular_velocity;   // рад/с
+    
+    // Географические координаты (для вывода и GNSS)
+    GeoPosition geo_position;
+    
+    TrajectoryPoint(double t = 0);
+    
+    std::string toCSV() const;
+    bool isValid() const;
+};
+#include "TrajectoryPoint.h"
+#include <sstream>
+#include <iomanip>
+
+TrajectoryPoint::TrajectoryPoint(double t) : time(t) {}
+
+std::string TrajectoryPoint::toCSV() const {
+    std::stringstream ss;
+    ss << std::fixed << std::setprecision(8);
+    ss << time << ","
+       << position_eci.x << "," << position_eci.y << "," << position_eci.z << ","
+       << velocity_eci.x << "," << velocity_eci.y << "," << velocity_eci.z << ","
+       << acceleration_eci.x << "," << acceleration_eci.y << "," << acceleration_eci.z << ","
+       << angular_velocity.x << "," << angular_velocity.y << "," << angular_velocity.z << ","
+       << orientation.x << "," << orientation.y << "," << orientation.z << ","
+       << geo_position.latitude << "," << geo_position.longitude << "," << geo_position.altitude;
+    return ss.str();
+}
+
+bool TrajectoryPoint::isValid() const {
+    return !std::isnan(time) && 
+           position_eci.isValid() && 
+           velocity_eci.isValid() && 
+           acceleration_eci.isValid();
+}
+#pragma once
+#include "core/Vector3.h"
+
+class TrajectorySegment {
+public:
+    double duration;
+    
+    TrajectorySegment(double d) : duration(d) {}
+    virtual ~TrajectorySegment() = default;
+    
+    virtual Vector3 position(double t) const = 0;
+    virtual Vector3 velocity(double t) const = 0;
+    virtual Vector3 acceleration(double t) const = 0;
+    virtual Vector3 orientation(double t) const = 0;
+    virtual Vector3 angular_velocity(double t) const = 0;
+    virtual int getType() const = 0;
+};
+#pragma once
+#include "TrajectorySegment.h"
+
+class StraightSegment : public TrajectorySegment {
+private:
+    Vector3 start_velocity_;
+    Vector3 acceleration_;
+    double angle_;
+
+public:
+    StraightSegment(double duration, Vector3 start_vel, Vector3 acc, double angle);
+    
+    Vector3 position(double t) const override;
+    Vector3 velocity(double t) const override;
+    Vector3 acceleration(double t) const override;
+    Vector3 orientation(double t) const override;
+    Vector3 angular_velocity(double t) const override;
+    int getType() const override { return 1; }
+};
+#include "StraightSegment.h"
+
+StraightSegment::StraightSegment(double duration, Vector3 start_vel, Vector3 acc, double angle)
+    : TrajectorySegment(duration), start_velocity_(start_vel), acceleration_(acc), angle_(angle) {}
+
+Vector3 StraightSegment::position(double t) const {
+    return start_velocity_ * t + acceleration_ * (0.5 * t * t);
+}
+
+Vector3 StraightSegment::velocity(double t) const {
+    return start_velocity_ + acceleration_ * t;
+}
+
+Vector3 StraightSegment::acceleration(double t) const {
+    return acceleration_;
+}
+
+Vector3 StraightSegment::orientation(double t) const {
+    Vector3 v = velocity(t);
+    double len = v.length();
+    if (len > 1e-6) return v / len;
+    return Vector3(1, 0, 0);
+}
+
+Vector3 StraightSegment::angular_velocity(double t) const {
+    return Vector3(0, 0, 0);
+}
+#pragma once
+#include "TrajectorySegment.h"
+
+class CircleSegment : public TrajectorySegment {
+private:
+    Vector3 center_;
+    double radius_;
+    double angular_vel_;
+    double start_angle_;
+
+public:
+    CircleSegment(double duration, Vector3 center, double radius, double angular_vel, double start_angle);
+    
+    Vector3 position(double t) const override;
+    Vector3 velocity(double t) const override;
+    Vector3 acceleration(double t) const override;
+    Vector3 orientation(double t) const override;
+    Vector3 angular_velocity(double t) const override;
+    int getType() const override { return 3; }
+};
+#include "CircleSegment.h"
+#include <cmath>
+
+CircleSegment::CircleSegment(double duration, Vector3 center, double radius, double angular_vel, double start_angle)
+    : TrajectorySegment(duration), center_(center), radius_(radius), angular_vel_(angular_vel), start_angle_(start_angle) {}
+
+Vector3 CircleSegment::position(double t) const {
+    double angle = start_angle_ + angular_vel_ * t;
+    return Vector3(radius_ * cos(angle), radius_ * sin(angle), 0);
+}
+
+Vector3 CircleSegment::velocity(double t) const {
+    double angle = start_angle_ + angular_vel_ * t;
+    return Vector3(-radius_ * angular_vel_ * sin(angle), radius_ * angular_vel_ * cos(angle), 0);
+}
+
+Vector3 CircleSegment::acceleration(double t) const {
+    double angle = start_angle_ + angular_vel_ * t;
+    return Vector3(-radius_ * angular_vel_ * angular_vel_ * cos(angle), -radius_ * angular_vel_ * angular_vel_ * sin(angle), 0);
+}
+
+Vector3 CircleSegment::orientation(double t) const {
+    Vector3 v = velocity(t);
+    double len = v.length();
+    if (len > 1e-6) return v / len;
+    return Vector3(1, 0, 0);
+}
+
+Vector3 CircleSegment::angular_velocity(double t) const {
+    return Vector3(0, 0, angular_vel_);
+}
+#pragma once
+#include "TrajectorySegment.h"
+
+class SnakeSegment : public TrajectorySegment {
+private:
+    double forward_vel_;
+    double amplitude_;
+    double frequency_;
+    double direction_angle_;
+
+public:
+    SnakeSegment(double duration, double forward_vel, double amplitude, double frequency, double direction_angle);
+    
+    Vector3 position(double t) const override;
+    Vector3 velocity(double t) const override;
+    Vector3 acceleration(double t) const override;
+    Vector3 orientation(double t) const override;
+    Vector3 angular_velocity(double t) const override;
+    int getType() const override { return 2; }
+};
+#include "SnakeSegment.h"
+#include <cmath>
+
+const double PI = 3.141592653589793;
+
+SnakeSegment::SnakeSegment(double duration, double forward_vel, double amplitude, double frequency, double direction_angle)
+    : TrajectorySegment(duration), forward_vel_(forward_vel), amplitude_(amplitude), frequency_(frequency), direction_angle_(direction_angle) {}
+
+Vector3 SnakeSegment::position(double t) const {
+    double omega = 2 * PI * frequency_;
+    double dir_x = cos(direction_angle_);
+    double dir_y = sin(direction_angle_);
+    double perp_x = -dir_y;
+    double perp_y = dir_x;
+    
+    double forward_dist = forward_vel_ * t;
+    double lateral_dist = amplitude_ * sin(omega * t);
+    
+    return Vector3(
+        forward_dist * dir_x + lateral_dist * perp_x,
+        forward_dist * dir_y + lateral_dist * perp_y,
+        0
+    );
+}
+
+Vector3 SnakeSegment::velocity(double t) const {
+    double omega = 2 * PI * frequency_;
+    double dir_x = cos(direction_angle_);
+    double dir_y = sin(direction_angle_);
+    double perp_x = -dir_y;
+    double perp_y = dir_x;
+    
+    return Vector3(
+        forward_vel_ * dir_x + amplitude_ * omega * cos(omega * t) * perp_x,
+        forward_vel_ * dir_y + amplitude_ * omega * cos(omega * t) * perp_y,
+        0
+    );
+}
+
+Vector3 SnakeSegment::acceleration(double t) const {
+    double omega = 2 * PI * frequency_;
+    double dir_x = cos(direction_angle_);
+    double dir_y = sin(direction_angle_);
+    double perp_x = -dir_y;
+    double perp_y = dir_x;
+    
+    return Vector3(
+        -amplitude_ * omega * omega * sin(omega * t) * perp_x,
+        -amplitude_ * omega * omega * sin(omega * t) * perp_y,
+        0
+    );
+}
+
+Vector3 SnakeSegment::orientation(double t) const {
+    Vector3 v = velocity(t);
+    double len = v.length();
+    if (len > 1e-6) return v / len;
+    return Vector3(1, 0, 0);
+}
+
+Vector3 SnakeSegment::angular_velocity(double t) const {
+    Vector3 v = velocity(t);
+    Vector3 a = acceleration(t);
+    double vx = v.x, vy = v.y;
+    double ax = a.x, ay = a.y;
+    double v_len2 = vx*vx + vy*vy;
+    if (v_len2 < 1e-6) return Vector3(0, 0, 0);
+    double omega_z = (vx * ay - vy * ax) / v_len2;
+    return Vector3(0, 0, omega_z);
+}
+#pragma once
+#include "core/Vector3.h"
+
+class SmoothTurn {
+public:
+    Vector3 v1, v2;
+    double duration;
+    double speed1, speed2;
+    
+    SmoothTurn(Vector3 a, Vector3 b, double d, double max_acc = 0);
+    
+    Vector3 getVel(double t) const;
+};
+#include "SmoothTurn.h"
+#include <cmath>
+
+const double PI = 3.141592653589793;
+
+SmoothTurn::SmoothTurn(Vector3 a, Vector3 b, double d, double max_acc)
+    : v1(a), v2(b), duration(d), speed1(a.length()), speed2(b.length()) {
+    
+    double speed = speed1;
+    if (speed < 0.1) return;
+    
+    double angle1 = atan2(v1.y, v1.x);
+    double angle2 = atan2(v2.y, v2.x);
+    
+    double delta = angle2 - angle1;
+    while (delta > PI) delta -= 2 * PI;
+    while (delta < -PI) delta += 2 * PI;
+    
+    if (fabs(delta) < 0.01) return;
+    
+    double R_min = (speed * speed) / max_acc;
+    double d_min = R_min * tan(fabs(delta) / 2.0);
+    double min_duration = d_min / speed;
+    
+    if (duration < min_duration) duration = min_duration;
+    if (duration < 0.05) duration = 0.05;
+}
+
+Vector3 SmoothTurn::getVel(double t) const {
+    double u = t / duration;
+    if (u > 1.0) u = 1.0;
+    
+    double s = u * u * (3 - 2 * u);
+    
+    Vector3 d1 = v1.normalized();
+    Vector3 d2 = v2.normalized();
+    
+    Vector3 dir = d1 * (1 - s) + d2 * s;
+    dir = dir.normalized();
+    
+    double speed = speed1 * (1 - u) + speed2 * u;
+    
+    return dir * speed;
+}
+#pragma once
+#include <vector>
+#include <memory>
+#include "TrajectorySegment.h"
+#include "core/GeoPosition.h"
+
+struct TrajectoryConfig {
+    bool witch_from = false;
+    std::string file_path;
+    std::vector<std::shared_ptr<TrajectorySegment>> segments;
+    double time_step = 0.1;
+    GeoPosition start_geo_position;
+    
+    TrajectoryConfig(bool witch_from = false, double step = 0.1);
+};
+
+#include "TrajectoryConfig.h"
+
+TrajectoryConfig::TrajectoryConfig(bool witch_from, double step)
+    : witch_from(witch_from), time_step(step) {}
+#pragma once
+#include "TrajectoryConfig.h"
+#include "core/TrajectoryPoint.h"
+#include "core/CoordinateTransforms.h"
+
+class TrajectoryGenerator {
+public:
+    TrajectoryConfig config;
+    CoordinateTransforms transforms;
+    
+    TrajectoryGenerator(const TrajectoryConfig& cfg);
+    
+    vector<TrajectoryPoint> build();
+    vector<TrajectoryPoint> buildWithSmoothing(double max_normal_acc);
+    vector<TrajectoryPoint> loadFromFile(const string& filename);
+    void computeDerivatives(vector<TrajectoryPoint>& traj);
+    
+    void addStraight(double duration, Vector3 start_pos, Vector3 start_vel, Vector3 acc, double angle);
+    void addSnake(double duration, Vector3 start_pos, double forward_vel, double amplitude, double frequency);
+    void addCircle(double duration, Vector3 center, double radius, double angular_vel, double start_angle);
+};
+#include "TrajectoryGenerator.h"
+#include "StraightSegment.h"
+#include "SnakeSegment.h"
+#include "CircleSegment.h"
+#include "SmoothTurn.h"
+#include <fstream>
+#include <sstream>
+#include <algorithm>
+
+TrajectoryGenerator::TrajectoryGenerator(const TrajectoryConfig& cfg) : config(cfg) {
+    transforms.init(config.start_geo_position, 0);
+}
+
+vector<TrajectoryPoint> TrajectoryGenerator::buildWithSmoothing(double max_normal_acc) {
+    if (config.witch_from) {
+        return loadFromFile(config.file_path);
+    }
+    
+    vector<TrajectoryPoint> trajectory;
+    double current_time = 0;
+    
+    if (config.segments.empty()) {
+        cout << "No segments for generation" << endl;
+        return trajectory;
+    }
+    
+    // Начальная абсолютная позиция в ECI
+    Vector3 abs_pos_eci = transforms.geoToEci(config.start_geo_position, 0);
+    
+    for (size_t i = 0; i < config.segments.size(); i++) {
+        auto& seg = config.segments[i];
+        double duration = seg->duration;
+        
+        // Запоминаем начало сегмента
+        Vector3 seg_start_abs = abs_pos_eci;
+        
+        // Генерация точек сегмента
+        for (double t = 0; t <= duration; t += config.time_step) {
+            if (t > duration) t = duration;
+            
+            Vector3 local_pos = seg->position(t);
+            Vector3 current_abs_eci = seg_start_abs + local_pos;
+            Vector3 current_vel = seg->velocity(t);
+            
+            TrajectoryPoint point(current_time + t);
+            point.position_eci = current_abs_eci;
+            point.velocity_eci = current_vel;
+            point.acceleration_eci = seg->acceleration(t);
+            point.orientation = seg->orientation(t);
+            point.angular_velocity = seg->angular_velocity(t);
+            point.geo_position = transforms.eciToGeo(current_abs_eci, current_time + t);
+            
+            trajectory.push_back(point);
+        }
+        
+        // Обновляем позицию после сегмента
+        abs_pos_eci = seg_start_abs + seg->position(duration);
+        current_time += duration;
+        
+        // Плавный поворот
+        if (i < config.segments.size() - 1) {
+            Vector3 endVel = seg->velocity(duration);
+            Vector3 nextVel = config.segments[i+1]->velocity(0);
+            
+            double turn_duration = 1.0;
+            if (seg->getType() == 3 || config.segments[i+1]->getType() == 3) {
+                turn_duration = 0.3;
+            }
+            
+            SmoothTurn turn(endVel, nextVel, turn_duration, max_normal_acc);
+            
+            Vector3 turn_start_pos = abs_pos_eci;
+            
+            for (double t = config.time_step; t <= turn.duration; t += config.time_step) {
+                if (t > turn.duration) t = turn.duration;
+                
+                Vector3 vel = turn.getVel(t);
+                Vector3 pos = turn_start_pos + vel * t;
+                
+                TrajectoryPoint point(current_time + t);
+                point.position_eci = pos;
+                point.velocity_eci = vel;
+                point.geo_position = transforms.eciToGeo(pos, current_time + t);
+                
+                trajectory.push_back(point);
+            }
+            
+            abs_pos_eci = turn_start_pos + turn.getVel(turn.duration) * turn.duration;
+            current_time += turn.duration;
+        }
+    }
+    
+    return trajectory;
+}
+
+vector<TrajectoryPoint> TrajectoryGenerator::build() {
+    if (config.witch_from) {
+        return loadFromFile(config.file_path);
+    }
+    return buildWithSmoothing(100.0);
+}
+
+vector<TrajectoryPoint> TrajectoryGenerator::loadFromFile(const string& filename) {
+    ifstream file(filename);
+    vector<TrajectoryPoint> traj;
+    
+    if (!file.is_open()) {
+        cout << "Error opening file: " << filename << endl;
+        return traj;
+    }
+    
+    string line;
+    getline(file, line);
+    
+    while (getline(file, line)) {
+        if (line.empty()) continue;
+        
+        stringstream ss(line);
+        vector<double> values;
+        string val;
+        while (getline(ss, val, ',')) {
+            values.push_back(stod(val));
+        }
+        
+        if (values.size() >= 7) {
+            TrajectoryPoint p(values[0]);
+            p.geo_position = GeoPosition(values[1], values[2], values[3]);
+            p.position_eci = transforms.geoToEci(p.geo_position, values[0]);
+            p.orientation = Vector3(values[4], values[5], values[6]);
+            traj.push_back(p);
+        }
+    }
+    
+    computeDerivatives(traj);
+    file.close();
+    return traj;
+}
+
+void TrajectoryGenerator::computeDerivatives(vector<TrajectoryPoint>& traj) {
+    if (traj.size() < 2) return;
+    
+    double dt = traj[1].time - traj[0].time;
+    
+    for (size_t i = 0; i < traj.size() - 1; i++) {
+        traj[i].velocity_eci = (traj[i+1].position_eci - traj[i].position_eci) / dt;
+        traj[i].acceleration_eci = (traj[i+1].velocity_eci - traj[i].velocity_eci) / dt;
+        
+        Vector3 dTheta = traj[i+1].orientation - traj[i].orientation;
+        traj[i].angular_velocity = Vector3(dTheta.x/dt, dTheta.y/dt, dTheta.z/dt);
+    }
+    
+    size_t last = traj.size() - 1;
+    traj[last].velocity_eci = traj[last-1].velocity_eci;
+    traj[last].acceleration_eci = traj[last-1].acceleration_eci;
+    traj[last].angular_velocity = traj[last-1].angular_velocity;
+}
+
+void TrajectoryGenerator::addStraight(double duration, Vector3 start_pos, Vector3 start_vel, Vector3 acc, double angle) {
+    config.segments.push_back(make_shared<StraightSegment>(duration, start_vel, acc, angle));
+}
+
+void TrajectoryGenerator::addSnake(double duration, Vector3 start_pos, double forward_vel, double amplitude, double frequency) {
+    config.segments.push_back(make_shared<SnakeSegment>(duration, forward_vel, amplitude, frequency, 0));
+}
+
+void TrajectoryGenerator::addCircle(double duration, Vector3 center, double radius, double angular_vel, double start_angle) {
+    config.segments.push_back(make_shared<CircleSegment>(duration, center, radius, angular_vel, 
+}
+#pragma once
+#include <string>
+#include <memory>
+#include "core/TrajectoryPoint.h"
+#include "SensorMeasurement.h"
+
+struct SensorStaticParams {
+    std::string name;
+    double frequency;
+    
+    SensorStaticParams(const std::string& n = "", double f = 100.0) : name(n), frequency(f) {}
+};
+
+struct SensorDynamicEvent {
+    double time = 0;
+    bool is_valid = false;
+    double last_valid_measurement_time = 0;
+    std::shared_ptr<SensorMeasurement> last_measurement;
+    
+    SensorDynamicEvent(double t = 0) : time(t), last_valid_measurement_time(t) {}
+};
+
+class Sensor {
+public:
+    SensorStaticParams static_params;
+    SensorDynamicEvent dynamic_state;
+    double last_measurement_time = -1;
+    
+    Sensor(const SensorStaticParams& params);
+    virtual ~Sensor() = default;
+    
+    std::string getName() const { return static_params.name; }
+    
+    bool shouldSample(double current_time);
+    virtual std::shared_ptr<SensorMeasurement> getMeasurement(const TrajectoryPoint& state) = 0;
+};
+#include "Sensor.h"
+
+Sensor::Sensor(const SensorStaticParams& params) : static_params(params), dynamic_state(0) {}
+
+bool Sensor::shouldSample(double current_time) {
+    if (last_measurement_time < -1) return true;
+    double dt = current_time - last_measurement_time;
+    return dt >= (1.0 / static_params.frequency);
+}
+#pragma once
+#include "Sensor.h"
+#include <random>
+#include "core/CoordinateTransforms.h"
+
+class Accelerometer : public Sensor {
+private:
+    double bias_x, bias_y, bias_z;
+    double noise;
+    mutable std::normal_distribution<double> noise_dist;
+    mutable std::default_random_engine generator;
+    const CoordinateTransforms& transforms;
+
+public:
+    Accelerometer(double freq, double b_x, double b_y, double b_z, double noise,
+                  const CoordinateTransforms& tf);
+    
+    std::shared_ptr<SensorMeasurement> getMeasurement(const TrajectoryPoint& state) override;
+};
+#include "Accelerometer.h"
+#include "VectorMeasurement.h"
+#include <chrono>
+
+Accelerometer::Accelerometer(double freq, double b_x, double b_y, double b_z, double noise,
+                             const CoordinateTransforms& tf)
+    : Sensor(SensorStaticParams("Accelerometer", freq)),
+      bias_x(b_x), bias_y(b_y), bias_z(b_z), noise(noise),
+      noise_dist(0.0, noise), transforms(tf) {
+    auto seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    generator.seed(seed);
+}
+
+std::shared_ptr<SensorMeasurement> Accelerometer::getMeasurement(const TrajectoryPoint& state) {
+    if (!shouldSample(state.time)) {
+        return dynamic_state.last_measurement;
+    }
+    
+    // 1. Ускорение в ECI
+    Vector3 a_eci = state.acceleration_eci;
+    
+    // 2. ECI → ECEF
+    Vector3 a_ecef = transforms.eciToEcef(a_eci, state.time);
+    
+    // 3. ECEF → ENU
+    Vector3 a_enu = transforms.ecefToEnu(a_ecef, 
+                                         state.geo_position.latitude, 
+                                         state.geo_position.longitude);
+    
+    // 4. Вычитаем гравитацию
+    a_enu.z -= 9.80665;
+    
+    // 5. ENU → Body
+    Vector3 ideal = transforms.enuToBody(a_enu, 
+                                         state.orientation.x, 
+                                         state.orientation.y, 
+                                         state.orientation.z);
+    
+    // 6. Добавляем погрешности
+    Vector3 measured(
+        ideal.x + bias_x + noise_dist(generator),
+        ideal.y + bias_y + noise_dist(generator),
+        ideal.z + bias_z + noise_dist(generator)
+    );
+    
+    auto measurement = std::make_shared<VectorMeasurement>(state.time, getName(), measured);
+    
+    dynamic_state.time = state.time;
+    dynamic_state.is_valid = measured.isValid();
+    if (dynamic_state.is_valid) {
+        dynamic_state.last_valid_measurement_time = state.time;
+        dynamic_state.last_measurement = measurement;
+    }
+    last_measurement_time = state.time;
+    
+    return measurement;
+}
+#include "trajectory/TrajectoryGenerator.h"
+#include "trajectory/StraightSegment.h"
+#include "trajectory/SnakeSegment.h"
+#include "trajectory/CircleSegment.h"
+#include "sensors/Accelerometer.h"
+#include "sensors/Gyroscope.h"
+#include "sensors/GNSS.h"
+#include <vector>
+#include <iostream>
+#include <fstream>
+#include <cmath>
+#include <iomanip>
+
+using namespace std;
+
+const double PI = 3.141592653589793;
+
+int main() {
+    cout << "=== MOTION SENSORS SIMULATOR ===" << endl;
+
+    TrajectoryConfig config;
+
+    cout << "1 - Analytical, 2 - From file: ";
+    int mode; cin >> mode;
+    config.witch_from = (mode == 2);
+
+    if (!config.witch_from) {
+        cout << "Time step (sec): "; cin >> config.time_step;
+        cout << "Start lat: "; cin >> config.start_geo_position.latitude;
+        cout << "Start lon: "; cin >> config.start_geo_position.longitude;
+        cout << "Start alt: "; cin >> config.start_geo_position.altitude;
+
+        double start_speed, start_acc;
+        cout << "Start speed (m/s): "; cin >> start_speed;
+        cout << "Start acceleration (m/s²): "; cin >> start_acc;
+
+        Vector3 start_vel(0, start_speed, 0);
+        Vector3 start_acc_vec(0, start_acc, 0);
+
+        cout << "Number of trajectory segments: "; int segs; cin >> segs;
+
+        Vector3 current_pos(0, 0, 0);
+        Vector3 current_vel = start_vel;
+        double current_abs_angle = 0.0;
+
+        TrajectoryGenerator generator(config);
+
+        for (int i = 0; i < segs; i++) {
+            cout << "\nSegment " << i + 1 << " type (1=straight, 2=snake, 3=circle): ";
+            int type; cin >> type;
+
+            if (type == 1) {
+                double dur, acc_mag, angle_deg;
+                cout << "Duration: "; cin >> dur;
+                cout << "Direction angle (degrees, 0=north, 90=east): "; cin >> angle_deg;
+                cout << "Acceleration magnitude: "; cin >> acc_mag;
+
+                double abs_angle_rad = angle_deg * PI / 180.0;
+                double speed = current_vel.length();
+                
+                Vector3 new_vel(speed * sin(abs_angle_rad), speed * cos(abs_angle_rad), 0);
+                Vector3 acc_vec(acc_mag * sin(abs_angle_rad), acc_mag * cos(abs_angle_rad), 0);
+
+                generator.addStraight(dur, current_pos, new_vel, acc_vec, angle_deg);
+                
+                current_pos = current_pos + new_vel * dur + acc_vec * (0.5 * dur * dur);
+                current_vel = new_vel + acc_vec * dur;
+            }
+            else if (type == 2) {
+                double dur, vx, A, f;
+                cout << "Duration: "; cin >> dur;
+                cout << "Forward velocity X (m/s): "; cin >> vx;
+                cout << "Amplitude: "; cin >> A;
+                cout << "Frequency: "; cin >> f;
+
+                generator.addSnake(dur, current_pos, vx, A, f);
+
+                double omega = 2 * PI * f;
+                current_pos = Vector3(current_pos.x + vx * dur, current_pos.y + A * sin(omega * dur), current_pos.z);
+                current_vel = Vector3(vx, A * omega * cos(omega * dur), 0);
+                current_abs_angle = atan2(current_vel.x, current_vel.y);
+            }
+            else if (type == 3) {
+                double dur, R, w;
+                cout << "Duration: "; cin >> dur;
+                cout << "Radius: "; cin >> R;
+                cout << "Angular velocity (rad/s): "; cin >> w;
+
+                Vector3 vel_dir = current_vel.normalized();
+                Vector3 perp;
+                if (w > 0) perp = Vector3(-vel_dir.y, vel_dir.x, 0);
+                else perp = Vector3(vel_dir.y, -vel_dir.x, 0);
+
+                Vector3 center = current_pos + perp * R;
+                double start_angle = atan2(current_pos.y - center.y, current_pos.x - center.x);
+
+                generator.addCircle(dur, center, R, w, start_angle);
+
+                double end_angle = start_angle + w * dur;
+                current_pos = Vector3(center.x + R * cos(end_angle), center.y + R * sin(end_angle), center.z);
+                current_vel = Vector3(-R * w * sin(end_angle), R * w * cos(end_angle), 0);
+                current_abs_angle = atan2(current_vel.x, current_vel.y);
+            }
+        }
+
+        double max_normal_acc;
+        cout << "\nMax normal acceleration for smoothing (m/s²): "; cin >> max_normal_acc;
+
+        auto trajectory = generator.buildWithSmoothing(max_normal_acc);
+
+        string traj_filename;
+        cout << "Output trajectory filename: "; cin >> traj_filename;
+
+        ofstream traj_file(traj_filename);
+        traj_file << "Time,PosX,PosY,PosZ,VelX,VelY,VelZ,AccX,AccY,AccZ,AngVelX,AngVelY,AngVelZ,Roll,Pitch,Yaw,Latitude,Longitude,Altitude\n";
+        for (const auto& point : trajectory) {
+            if (point.isValid()) traj_file << point.toCSV() << "\n";
+        }
+        traj_file.close();
+        cout << "True trajectory saved! " << trajectory.size() << " points\n";
+
+        // Датчики
+        vector<shared_ptr<Sensor>> sensors;
+
+        cout << "\n=== SENSORS CONFIGURATION ===" << endl;
+        cout << "Number of sensors: "; int n; cin >> n;
+        
+        for (int i = 0; i < n; i++) {
+            cout << "\nSensor " << i + 1 << ":" << endl;
+            cout << "1 - Accelerometer, 2 - Gyroscope, 3 - GNSS: ";
+            int type; cin >> type;
+            cout << "Frequency (Hz): "; double f; cin >> f;
+
+            if (type == 1) {
+                cout << "Bias X Y Z (m/s²): "; double bx, by, bz; cin >> bx >> by >> bz;
+                cout << "Noise (m/s²): "; double noise; cin >> noise;
+                sensors.push_back(make_shared<Accelerometer>(f, bx, by, bz, noise, generator.transforms));
+            }
+            else if (type == 2) {
+                cout << "Bias X Y Z (rad/s): "; double bx, by, bz; cin >> bx >> by >> bz;
+                cout << "Noise (rad/s): "; double noise; cin >> noise;
+                sensors.push_back(make_shared<Gyroscope>(f, bx, by, bz, noise));
+            }
+            else if (type == 3) {
+                cout << "Noise latitude (m): "; double n_lat; cin >> n_lat;
+                cout << "Noise longitude (m): "; double n_lon; cin >> n_lon;
+                cout << "Noise altitude (m): "; double n_alt; cin >> n_alt;
+                sensors.push_back(make_shared<GNSS>(f, n_lat, n_lon, n_alt));
+            }
+        }
+
+        vector<vector<shared_ptr<SensorMeasurement>>> sensor_measurements;
+        for (size_t i = 0; i < sensors.size(); ++i) {
+            sensor_measurements.emplace_back();
+        }
+
+        cout << "\n=== SIMULATION ===" << endl;
+        for (size_t step = 0; step < trajectory.size(); ++step) {
+            const TrajectoryPoint& state = trajectory[step];
+            
+            for (size_t i = 0; i < sensors.size(); ++i) {
+                auto measurement = sensors[i]->getMeasurement(state);
+                sensor_measurements[i].push_back(measurement);
+            }
+        }
+        cout << "Simulation complete. Processed " << trajectory.size() << " points\n";
+
+        string meas_filename;
+        cout << "\nOutput measurements filename: "; cin >> meas_filename;
+
+        ofstream meas_file(meas_filename);
+        if (!meas_file.is_open()) {
+            cout << "Error opening file: " << meas_filename << endl;
+            return 0;
+        }
+
+        meas_file << "Time";
+        for (const auto& sensor : sensors) {
+            string name = sensor->getName();
+            if (name.find("GNSS") != string::npos) {
+                meas_file << "," << name << "_Lat," << name << "_Lon," << name << "_Alt";
+            } else {
+                meas_file << "," << name << "_X," << name << "_Y," << name << "_Z";
+            }
+        }
+        meas_file << "\n";
+
+        if (!sensor_measurements.empty() && !sensor_measurements[0].empty()) {
+            int num_steps = sensor_measurements[0].size();
+            for (int i = 0; i < num_steps; ++i) {
+                meas_file << fixed << setprecision(6) << sensor_measurements[0][i]->time;
+                
+                for (size_t j = 0; j < sensors.size(); ++j) {
+                    if (i < sensor_measurements[j].size() && sensor_measurements[j][i]) {
+                        meas_file << "," << sensor_measurements[j][i]->toCSV();
+                    } else {
+                        meas_file << ",,,";
+                    }
+                }
+                meas_file << "\n";
+            }
+        }
+        meas_file.close();
+        cout << "Measurements saved to " << meas_filename << endl;
+
+    } else {
+        cout << "File: "; cin >> config.file_path;
+        cout << "Start lat: "; cin >> config.start_geo_position.latitude;
+        cout << "Start lon: "; cin >> config.start_geo_position.longitude;
+        cout << "Start alt: "; cin >> config.start_geo_position.altitude;
+        config.time_step = 0.1;
+
+        TrajectoryGenerator generator(config);
+        auto trajectory = generator.build();
+
+        string filename;
+        cout << "Output filename: "; cin >> filename;
+        ofstream file(filename);
+        file << "Time,PosX,PosY,PosZ,VelX,VelY,VelZ,AccX,AccY,AccZ,AngVelX,AngVelY,AngVelZ,Roll,Pitch,Yaw,Latitude,Longitude,Altitude\n";
+        for (const auto& point : trajectory) {
+            if (point.isValid()) file << point.toCSV() << "\n";
+        }
+        file.close();
+
+        cout << "Trajectory saved! " << trajectory.size() << " points\n";
+    }
+
+    return 0;
+}
+
