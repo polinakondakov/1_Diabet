@@ -1,0 +1,137 @@
+vector<TrajectoryPoint> TrajectoryGenerator::buildWithSmoothing(double max_normal_acc) {
+    if (config.witch_from) {
+        return loadFromFile(config.file_path);
+    }
+    
+    vector<TrajectoryPoint> trajectory;
+    double current_time = 0;
+    
+    if (config.segments.empty()) {
+        cout << "No segments for generation" << endl;
+        return trajectory;
+    }
+    
+    // Начальная абсолютная позиция в ECI
+    Vector3 abs_pos_eci = transforms.geoToEci(config.start_geo_position, 0);
+    
+    cout << "\n=== INITIAL DEBUG ===" << endl;
+    cout << "Start geo: (" << config.start_geo_position.latitude << ", " 
+         << config.start_geo_position.longitude << ")" << endl;
+    cout << "Start ECI: (" << abs_pos_eci.x << ", " << abs_pos_eci.y << ", " << abs_pos_eci.z << ")" << endl;
+    cout << "=====================" << endl;
+    
+    for (size_t i = 0; i < config.segments.size(); i++) {
+        auto& seg = config.segments[i];
+        double duration = seg->duration;
+        
+        // Запоминаем начало сегмента
+        Vector3 seg_start_abs = abs_pos_eci;
+        
+        cout << "\n--- SEGMENT " << i << " ---" << endl;
+        cout << "Type: " << seg->getType() << ", Duration: " << duration << endl;
+        cout << "seg_start_abs = (" << seg_start_abs.x << ", " << seg_start_abs.y << ")" << endl;
+        
+        int point_counter = 0;
+        
+        for (double t = 0; t <= duration; t += config.time_step) {
+            if (t > duration) t = duration;
+            
+            // Локальная позиция и абсолютная ECI
+            Vector3 local_pos = seg->position(t);
+            Vector3 current_abs_eci = seg_start_abs + local_pos;
+            Vector3 current_vel = seg->velocity(t);
+            
+            // Отладка первых 3 точек
+            if (point_counter < 3) {
+                cout << "\n  [POINT " << point_counter << "] t=" << t << endl;
+                cout << "    local_pos = (" << local_pos.x << ", " << local_pos.y << ")" << endl;
+                cout << "    current_abs_eci = (" << current_abs_eci.x << ", " << current_abs_eci.y << ")" << endl;
+                
+                // Проверка ECEF
+                Vector3 ecef = transforms.eciToEcef(current_abs_eci, current_time + t);
+                cout << "    ecef = (" << ecef.x << ", " << ecef.y << ")" << endl;
+                
+                // Проверка географических координат
+                GeoPosition geo = transforms.ecefToGeo(ecef);
+                cout << "    geo_from_ecef = (" << geo.latitude << ", " << geo.longitude << ")" << endl;
+                
+                point_counter++;
+            }
+            
+            TrajectoryPoint point(current_time + t);
+            point.position_eci = current_abs_eci;
+            point.velocity_eci = current_vel;
+            point.acceleration_eci = seg->acceleration(t);
+            point.orientation = seg->orientation(t);
+            point.angular_velocity = seg->angular_velocity(t);
+            point.geo_position = transforms.eciToGeo(current_abs_eci, current_time + t);
+            
+            // Отладка point.geo
+            if (point_counter <= 3) {
+                cout << "    point.geo = (" << point.geo_position.latitude << ", " 
+                     << point.geo_position.longitude << ")" << endl;
+            }
+            
+            trajectory.push_back(point);
+        }
+        
+        // Обновляем позицию после сегмента
+        abs_pos_eci = seg_start_abs + seg->position(duration);
+        current_time += duration;
+        
+        cout << "\nAfter segment: abs_pos_eci = (" << abs_pos_eci.x << ", " << abs_pos_eci.y << ")" << endl;
+        cout << "current_time = " << current_time << endl;
+        
+        // Плавный поворот (если не последний сегмент)
+        if (i < config.segments.size() - 1) {
+            Vector3 endVel = seg->velocity(duration);
+            Vector3 nextVel = config.segments[i+1]->velocity(0);
+            
+            double turn_duration = 1.0;
+            if (seg->getType() == 3 || config.segments[i+1]->getType() == 3) {
+                turn_duration = 0.3;
+            }
+            
+            SmoothTurn turn(endVel, nextVel, turn_duration, max_normal_acc);
+            
+            cout << "\n  --- SMOOTH TURN ---" << endl;
+            cout << "  turn_duration = " << turn_duration << endl;
+            cout << "  endVel = (" << endVel.x << ", " << endVel.y << ")" << endl;
+            cout << "  nextVel = (" << nextVel.x << ", " << nextVel.y << ")" << endl;
+            
+            Vector3 turn_start_pos = abs_pos_eci;
+            cout << "  turn_start_pos = (" << turn_start_pos.x << ", " << turn_start_pos.y << ")" << endl;
+            
+            int turn_counter = 0;
+            for (double t = config.time_step; t <= turn.duration; t += config.time_step) {
+                if (t > turn.duration) t = turn.duration;
+                
+                Vector3 vel = turn.getVel(t);
+                Vector3 pos = turn_start_pos + vel * t;
+                
+                if (turn_counter < 3) {
+                    cout << "  [TURN] t=" << t << " vel=(" << vel.x << "," << vel.y 
+                         << ") pos=(" << pos.x << "," << pos.y << ")" << endl;
+                    turn_counter++;
+                }
+                
+                TrajectoryPoint point(current_time + t);
+                point.position_eci = pos;
+                point.velocity_eci = vel;
+                point.geo_position = transforms.eciToGeo(pos, current_time + t);
+                
+                trajectory.push_back(point);
+            }
+            
+            abs_pos_eci = turn_start_pos + turn.getVel(turn.duration) * turn.duration;
+            current_time += turn.duration;
+            
+            cout << "  After turn: abs_pos_eci = (" << abs_pos_eci.x << ", " << abs_pos_eci.y << ")" << endl;
+        }
+    }
+    
+    cout << "\n=== GENERATION COMPLETE ===" << endl;
+    cout << "Total points: " << trajectory.size() << endl;
+    
+    return trajectory;
+}
