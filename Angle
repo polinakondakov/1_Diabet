@@ -1,0 +1,98 @@
+#pragma once
+#include <random>
+#include <vector>
+#include <cmath>
+
+class SmoothRandomAngle {
+private:
+    double min_value;
+    double max_value;
+    double min_interval;
+    double max_interval;
+    double duration;
+    double dt;
+    
+    struct Segment {
+        double t_start;
+        double t_end;
+        double u_start;
+        double u_end;
+    };
+    
+    std::vector<Segment> segments;
+    mutable std::mt19937 gen;
+    
+    double randomValue() {
+        std::uniform_real_distribution<> dist(min_value, max_value);
+        return dist(gen);
+    }
+    
+    double randomInterval() {
+        std::uniform_real_distribution<> dist(min_interval, max_interval);
+        return dist(gen);
+    }
+    
+    void generateSegments() {
+        segments.clear();
+        double t = 0;
+        double u_prev = randomValue();
+        
+        while (t < duration) {
+            double interval = randomInterval();
+            double t_next = std::min(t + interval, duration);
+            double u_next = randomValue();
+            
+            segments.push_back({t, t_next, u_prev, u_next});
+            
+            t = t_next;
+            u_prev = u_next;
+        }
+    }
+    
+    double interpolate(double t, double t0, double t1, double u0, double u1) const {
+        double tau = (t - t0) / (t1 - t0);
+        return (u0 + u1) / 2.0 + (u0 - u1) / 2.0 * cos(M_PI * tau);
+    }
+    
+public:
+    SmoothRandomAngle(double min_val, double max_val, double min_int, double max_int, 
+                      double dur, double step)
+        : min_value(min_val), max_value(max_val), 
+          min_interval(min_int), max_interval(max_int),
+          duration(dur), dt(step) {
+        std::random_device rd;
+        gen.seed(rd());
+        generateSegments();
+    }
+    
+    double getValue(double t) const {
+        if (t >= duration) t = duration - 1e-6;
+        
+        for (const auto& seg : segments) {
+            if (t >= seg.t_start && t <= seg.t_end) {
+                return interpolate(t, seg.t_start, seg.t_end, seg.u_start, seg.u_end);
+            }
+        }
+        return 0;
+    }
+    
+    double getDerivative(double t) const {
+        if (t >= duration) t = duration - 1e-6;
+        
+        for (const auto& seg : segments) {
+            if (t >= seg.t_start && t <= seg.t_end) {
+                double delta_t = seg.t_end - seg.t_start;
+                if (delta_t < 1e-9) return 0;
+                
+                double tau = (t - seg.t_start) / delta_t;
+                double du_dtau = -(seg.u_start - seg.u_end) * M_PI / 2.0 * sin(M_PI * tau);
+                return du_dtau / delta_t;
+            }
+        }
+        return 0;
+    }
+    
+    void reset() {
+        generateSegments();
+    }
+};
