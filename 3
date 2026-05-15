@@ -1,0 +1,130 @@
+vector<TrajectoryPoint> TrajectoryGenerator::buildWithSmoothing(double max_normal_acc) {
+    if (config.witch_from) {
+        return loadFromFile(config.file_path);
+    }
+
+    vector<TrajectoryPoint> trajectory;
+    double current_time = 0;
+    Vector3 pos(0, 0, 0);
+    Vector3 vel(0, 0, 0);
+
+    if (config.segments.empty()) {
+        cout << "No segments for generation" << endl;
+        return trajectory;
+    }
+
+    cout << "\n=== buildWithSmoothing DEBUG ===" << endl;
+    cout << "max_normal_acc = " << max_normal_acc << endl;
+    cout << "Number of segments: " << config.segments.size() << endl;
+
+    for (size_t i = 0; i < config.segments.size(); i++) {
+        auto& seg = config.segments[i];
+        double duration = seg->duration;
+        
+        cout << "\n--- Segment " << i << " ---" << endl;
+        cout << "Type: " << seg->getType() << ", duration: " << duration << endl;
+        
+        // Начальная скорость сегмента
+        Vector3 start_vel = seg->velocity(0);
+        Vector3 end_vel = seg->velocity(duration);
+        cout << "Start vel: (" << start_vel.x << ", " << start_vel.y << ", " << start_vel.z << ")" << endl;
+        cout << "End vel: (" << end_vel.x << ", " << end_vel.y << ", " << end_vel.z << ")" << endl;
+
+        // ===== ГЕНЕРАЦИЯ ТОЧЕК СЕГМЕНТА =====
+        double t_step = config.time_step;
+        int points_in_segment = 0;
+        
+        for (double t = 0; t <= duration + 1e-9; t += t_step) {
+            if (t > duration) t = duration;
+            
+            vel = seg->velocity(t);
+            pos = pos + vel * t_step;
+
+            TrajectoryPoint point(current_time + t);
+            point.position = pos;
+            point.velocity = vel;
+            point.acceleration = seg->acceleration(t);
+            point.orientation = seg->orientation(t);
+            point.angular_velocity = seg->angular_velocity(t);
+            point.geo_position = ENUToGeo(point.position, config.start_geo_position);
+
+            trajectory.push_back(point);
+            points_in_segment++;
+            
+            if (t >= duration) break;
+        }
+        
+        cout << "Generated " << points_in_segment << " points in segment" << endl;
+        cout << "Pos after segment: (" << pos.x << ", " << pos.y << ", " << pos.z << ")" << endl;
+
+        current_time += duration;
+
+        // ===== ПЛАВНЫЙ ПОВОРОТ МЕЖДУ СЕГМЕНТАМИ =====
+        if (i < config.segments.size() - 1) {
+            Vector3 endVel = seg->velocity(duration);
+            Vector3 nextVel = config.segments[i+1]->velocity(0);
+            
+            cout << "\n--- Turn between segment " << i << " and " << i+1 << " ---" << endl;
+            cout << "endVel = (" << endVel.x << ", " << endVel.y << ", " << endVel.z << ")" << endl;
+            cout << "nextVel = (" << nextVel.x << ", " << nextVel.y << ", " << nextVel.z << ")" << endl;
+            
+            double vel_diff = (endVel - nextVel).length();
+            cout << "Velocity difference: " << vel_diff << endl;
+            
+            if (vel_diff < 0.01) {
+                cout << "Velocities almost equal, skipping turn" << endl;
+                continue;
+            }
+            
+            double turn_duration = min(1.0, duration * 0.3);
+            if (seg->getType() == 3 || config.segments[i+1]->getType() == 3) {
+                turn_duration = min(0.5, duration * 0.2);
+            }
+            
+            cout << "Requested turn_duration: " << turn_duration << endl;
+
+            SmoothTurn turn(endVel, nextVel, turn_duration, max_normal_acc);
+            double actual_duration = turn.getDuration();
+            
+            cout << "Actual turn duration: " << actual_duration << endl;
+            
+            if (actual_duration < 0.05) {
+                cout << "Turn duration too small, skipping" << endl;
+                continue;
+            }
+            
+            Vector3 turn_start_pos = pos;
+            int turn_points = 0;
+            
+            for (double t = t_step; t <= actual_duration + 1e-9; t += t_step) {
+                if (t > actual_duration) t = actual_duration;
+                
+                vel = turn.getVel(t);
+                pos = turn_start_pos + vel * t;
+                
+                TrajectoryPoint point(current_time + t);
+                point.position = pos;
+                point.velocity = vel;
+                point.geo_position = ENUToGeo(point.position, config.start_geo_position);
+                
+                trajectory.push_back(point);
+                turn_points++;
+                
+                if (t >= actual_duration) break;
+            }
+            
+            cout << "Generated " << turn_points << " points in turn" << endl;
+            
+            current_time += actual_duration;
+            pos = turn_start_pos + turn.getVel(actual_duration) * actual_duration;
+            vel = turn.getVel(actual_duration);
+            
+            cout << "Pos after turn: (" << pos.x << ", " << pos.y << ", " << pos.z << ")" << endl;
+        }
+    }
+
+    cout << "\nTotal points generated: " << trajectory.size() << endl;
+    cout << "================================" << endl;
+    
+    return trajectory;
+}
