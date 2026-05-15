@@ -1,0 +1,11 @@
+// Перед вызовом buildWithSmoothing добавьте:
+cout << "\n=== CHECKING SEGMENT VELOCITIES ===" << endl;
+for (size_t i = 0; i < config.segments.size(); i++) {
+    cout << "Segment " << i << ":" << endl;
+    cout << "  vel(0) = (" << config.segments[i]->velocity(0).x 
+         << ", " << config.segments[i]->velocity(0).y 
+         << ", " << config.segments[i]->velocity(0).z << ")" << endl;
+    cout << "  vel(end) = (" << config.segments[i]->velocity(config.segments[i]->duration).x 
+         << ", " << config.segments[i]->velocity(config.segments[i]->duration).y 
+         << ", " << config.segments[i]->velocity(config.segments[i]->duration).z << ")" << endl;
+}
