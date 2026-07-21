@@ -1,0 +1,247 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import csv
+import math
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+from collections import defaultdict
+
+# ----------------------------------------------------------------
+# 1. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ----------------------------------------------------------------
+
+def distance(p1, p2):
+    return math.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2 + (p1[2]-p2[2])**2)
+
+def cluster_points(points, dist_threshold):
+    n = len(points)
+    used = [False] * n
+    clusters = []
+    for i in range(n):
+        if used[i]:
+            continue
+        cluster = [points[i]]
+        used[i] = True
+        changed = True
+        while changed:
+            changed = False
+            for j in range(n):
+                if used[j]:
+                    continue
+                for p in cluster:
+                    if distance(p, points[j]) < dist_threshold:
+                        cluster.append(points[j])
+                        used[j] = True
+                        changed = True
+                        break
+        clusters.append(cluster)
+    return clusters
+
+def compute_center(cluster):
+    n = len(cluster)
+    if n == 0:
+        return None
+    sum_x = sum(p[0] for p in cluster)
+    sum_y = sum(p[1] for p in cluster)
+    sum_z = sum(p[2] for p in cluster)
+    return (sum_x/n, sum_y/n, sum_z/n)
+
+def bounding_box(cluster):
+    xs = [p[0] for p in cluster]
+    ys = [p[1] for p in cluster]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+# ----------------------------------------------------------------
+# 2. ЧТЕНИЕ CSV С ГРУППИРОВКОЙ ПО КАДРАМ (200 мс)
+# ----------------------------------------------------------------
+
+def parse_time(time_str):
+    parts = time_str.split(':')
+    if len(parts) != 3:
+        return None
+    try:
+        hours = float(parts[0])
+        minutes = float(parts[1])
+        seconds = float(parts[2])
+        return hours * 3600 + minutes * 60 + seconds
+    except ValueError:
+        return None
+
+def read_livox_csv(file_path, frame_duration=0.2):
+    all_points = []
+    with open(file_path, 'r') as f:
+        reader = csv.reader(f)
+        next(reader, None)  # пропускаем заголовок
+        for row in reader:
+            if len(row) < 5:
+                continue
+            try:
+                time_str = row[0].strip()
+                time_sec = parse_time(time_str)
+                if time_sec is None:
+                    continue
+                x = float(row[1])
+                y = float(row[2])
+                z = float(row[3])
+                intensity = float(row[4])
+                all_points.append((time_sec, x, y, z, intensity))
+            except ValueError:
+                continue
+
+    if not all_points:
+        return []
+
+    all_points.sort(key=lambda p: p[0])
+    min_time = all_points[0][0]
+    max_time = all_points[-1][0]
+    frames = []
+    start = min_time
+    while start <= max_time:
+        end = start + frame_duration
+        frame_points = [
+            (x, y, z, intensity)
+            for (t, x, y, z, intensity) in all_points
+            if start <= t < end
+        ]
+        frames.append((start, frame_points))
+        start = end
+    return frames
+
+# ----------------------------------------------------------------
+# 3. ОБРАБОТКА КАДРОВ (кластеризация, центры, боксы)
+# ----------------------------------------------------------------
+
+def process_frames(frames, intensity_threshold=240, cluster_dist=0.15):
+    processed = []
+    for time, points in frames:
+        bright = [p for p in points if p[3] >= intensity_threshold]
+        if len(bright) < 3:
+            processed.append({'time': time, 'clusters': [], 'centers': [], 'bboxes': []})
+            continue
+        clusters = cluster_points(bright, cluster_dist)
+        clusters = [c for c in clusters if len(c) >= 3]
+        centers = [compute_center(c) for c in clusters]
+        bboxes = [bounding_box(c) for c in clusters]
+        processed.append({
+            'time': time,
+            'clusters': clusters,
+            'centers': centers,
+            'bboxes': bboxes
+        })
+    return processed
+
+# ----------------------------------------------------------------
+# 4. АНИМИРОВАННАЯ ВИЗУАЛИЗАЦИЯ
+# ----------------------------------------------------------------
+
+def animate_frames(processed_frames, interval=500):
+    """
+    Создаёт анимацию, показывающую кадры один за другим.
+    interval – задержка между кадрами в миллисекундах.
+    """
+    fig, ax = plt.subplots(figsize=(10, 8))
+    ax.set_xlabel('X (м)')
+    ax.set_ylabel('Y (м)')
+    ax.set_title('Детекция маркеров во времени')
+    ax.axis('equal')
+    ax.grid(True, alpha=0.3)
+    # Автоматически масштабируем оси по всем данным
+    all_x = []
+    all_y = []
+    for fd in processed_frames:
+        for cl in fd['clusters']:
+            all_x.extend([p[0] for p in cl])
+            all_y.extend([p[1] for p in cl])
+    if all_x and all_y:
+        margin = 0.5
+        ax.set_xlim(min(all_x)-margin, max(all_x)+margin)
+        ax.set_ylim(min(all_y)-margin, max(all_y)+margin)
+
+    # Текст для отображения времени
+    time_text = ax.text(0.02, 0.98, '', transform=ax.transAxes,
+                        fontsize=12, verticalalignment='top',
+                        bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+    def update(frame_idx):
+        ax.clear()
+        ax.set_xlabel('X (м)')
+        ax.set_ylabel('Y (м)')
+        ax.set_title('Детекция маркеров во времени')
+        ax.axis('equal')
+        ax.grid(True, alpha=0.3)
+        if all_x and all_y:
+            ax.set_xlim(min(all_x)-margin, max(all_x)+margin)
+            ax.set_ylim(min(all_y)-margin, max(all_y)+margin)
+
+        frame_data = processed_frames[frame_idx]
+        time_val = frame_data['time']
+
+        # Рисуем все точки кадра (серые, полупрозрачные)
+        all_points = []
+        for cl in frame_data['clusters']:
+            all_points.extend(cl)
+        if all_points:
+            xs = [p[0] for p in all_points]
+            ys = [p[1] for p in all_points]
+            ax.scatter(xs, ys, c='lightgray', s=2, alpha=0.5)
+
+        # Рисуем кластеры, боксы и центры
+        for cl, center, bbox in zip(frame_data['clusters'],
+                                    frame_data['centers'],
+                                    frame_data['bboxes']):
+            if center is None:
+                continue
+            # Точки кластера (синие)
+            cl_xs = [p[0] for p in cl]
+            cl_ys = [p[1] for p in cl]
+            ax.scatter(cl_xs, cl_ys, c='blue', s=10, alpha=0.7)
+            # Bounding box (зелёный)
+            x_min, y_min, x_max, y_max = bbox
+            rect = plt.Rectangle((x_min, y_min), x_max-x_min, y_max-y_min,
+                                 fill=False, edgecolor='green', linewidth=1.5)
+            ax.add_patch(rect)
+            # Центр (красный крест)
+            ax.scatter(center[0], center[1], c='red', marker='x', s=80, linewidths=2)
+
+        # Обновляем текст времени
+        # Преобразуем секунды обратно в формат Ч:М:С
+        hours = int(time_val // 3600)
+        minutes = int((time_val % 3600) // 60)
+        seconds = time_val % 60
+        time_str = f"{hours:02d}:{minutes:02d}:{seconds:06.3f}"
+        time_text.set_text(f"Время: {time_str}")
+        # Возвращаем текст, чтобы он не исчез
+        ax.add_artist(time_text)
+
+    # Создаём анимацию
+    ani = animation.FuncAnimation(fig, update, frames=len(processed_frames),
+                                  interval=interval, repeat=True)
+    plt.show()
+    return ani
+
+# ----------------------------------------------------------------
+# 5. ГЛАВНАЯ ФУНКЦИЯ
+# ----------------------------------------------------------------
+
+def main():
+    CSV_PATH = "path/to/your/file.csv"   # Укажите путь
+    FRAME_DURATION = 0.2          # 200 мс
+    INTENSITY_THRESHOLD = 240
+    CLUSTER_DIST = 0.15
+    ANIMATION_INTERVAL = 500      # мс между кадрами
+
+    print("Чтение CSV...")
+    frames = read_livox_csv(CSV_PATH, frame_duration=FRAME_DURATION)
+    print(f"Сформировано кадров: {len(frames)}")
+
+    print("Обработка кадров...")
+    processed = process_frames(frames, INTENSITY_THRESHOLD, CLUSTER_DIST)
+    total_clusters = sum(len(fd['clusters']) for fd in processed)
+    print(f"Всего обнаружено кластеров: {total_clusters}")
+
+    print("Запуск анимации...")
+    animate_frames(processed, interval=ANIMATION_INTERVAL)
+
+if __name__ == "__main__":
+    main()
