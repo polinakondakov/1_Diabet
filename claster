@@ -1,0 +1,333 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Простой детектор маркеров с кластеризацией, построением контуров (bounding box)
+и трекингом по времени.
+Вход: CSV с колонками time, x, y, z, intensity (порядок может быть любым).
+Выход: график на плоскости XY с отображением всех точек, кластеров, центров и траекторий.
+"""
+
+import csv
+import math
+import matplotlib.pyplot as plt
+import numpy as np
+from collections import defaultdict
+
+# ----------------------------------------------------------------
+# 1. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ----------------------------------------------------------------
+
+def distance(p1, p2):
+    """Евклидово расстояние между двумя точками (x, y, z)."""
+    return math.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2 + (p1[2]-p2[2])**2)
+
+def cluster_points(points, dist_threshold):
+    """
+    Кластеризация методом регионального роста.
+    points: список кортежей (x, y, z, intensity)
+    dist_threshold: максимальное расстояние между точками одного кластера.
+    Возвращает список кластеров, каждый кластер – список точек (x, y, z, intensity).
+    """
+    n = len(points)
+    used = [False] * n
+    clusters = []
+    for i in range(n):
+        if used[i]:
+            continue
+        # Начинаем новый кластер
+        cluster = [points[i]]
+        used[i] = True
+        changed = True
+        while changed:
+            changed = False
+            for j in range(n):
+                if used[j]:
+                    continue
+                # Проверяем расстояние до любой точки текущего кластера
+                for p in cluster:
+                    if distance(p, points[j]) < dist_threshold:
+                        cluster.append(points[j])
+                        used[j] = True
+                        changed = True
+                        break
+        clusters.append(cluster)
+    return clusters
+
+def compute_center(cluster):
+    """Вычисляет центр кластера как среднее арифметическое координат."""
+    n = len(cluster)
+    if n == 0:
+        return None
+    sum_x = sum(p[0] for p in cluster)
+    sum_y = sum(p[1] for p in cluster)
+    sum_z = sum(p[2] for p in cluster)
+    return (sum_x/n, sum_y/n, sum_z/n)
+
+def bounding_box(cluster):
+    """Возвращает (x_min, y_min, x_max, y_max) для кластера."""
+    xs = [p[0] for p in cluster]
+    ys = [p[1] for p in cluster]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+# ----------------------------------------------------------------
+# 2. ЧТЕНИЕ CSV
+# ----------------------------------------------------------------
+
+def read_livox_csv(file_path):
+    """
+    Читает CSV и группирует точки по времени.
+    Возвращает список кортежей (time, list_of_points),
+    где list_of_points – список (x, y, z, intensity).
+    """
+    frames = defaultdict(list)  # time -> list of points
+    with open(file_path, 'r') as f:
+        # Пытаемся определить заголовок
+        first_line = f.readline().strip()
+        f.seek(0)
+        # Проверяем, есть ли заголовок (содержит буквы)
+        has_header = any(c.isalpha() for c in first_line)
+        if has_header:
+            reader = csv.DictReader(f)
+            # Получаем имена колонок (приводим к нижнему регистру)
+            fieldnames = [col.lower() for col in reader.fieldnames]
+            # Определяем индексы нужных колонок
+            time_col = None
+            x_col = None
+            y_col = None
+            z_col = None
+            int_col = None
+            for idx, name in enumerate(fieldnames):
+                if 'time' in name:
+                    time_col = idx
+                elif name == 'x':
+                    x_col = idx
+                elif name == 'y':
+                    y_col = idx
+                elif name == 'z':
+                    z_col = idx
+                elif 'intensity' in name or 'inten' in name:
+                    int_col = idx
+            if None in (time_col, x_col, y_col, z_col, int_col):
+                raise ValueError("Не найдены все необходимые колонки: time, x, y, z, intensity")
+            # Читаем строки
+            for row in reader:
+                values = list(row.values())
+                try:
+                    t = float(values[time_col])
+                    x = float(values[x_col])
+                    y = float(values[y_col])
+                    z = float(values[z_col])
+                    intensity = float(values[int_col])
+                    frames[t].append((x, y, z, intensity))
+                except (ValueError, IndexError):
+                    continue
+        else:
+            # Если заголовка нет, предполагаем порядок: time, x, y, z, intensity
+            reader = csv.reader(f)
+            for row in reader:
+                if len(row) < 5:
+                    continue
+                try:
+                    t = float(row[0])
+                    x = float(row[1])
+                    y = float(row[2])
+                    z = float(row[3])
+                    intensity = float(row[4])
+                    frames[t].append((x, y, z, intensity))
+                except ValueError:
+                    continue
+
+    # Преобразуем в отсортированный список кадров
+    sorted_frames = [(t, frames[t]) for t in sorted(frames.keys())]
+    return sorted_frames
+
+# ----------------------------------------------------------------
+# 3. ОБРАБОТКА КАДРОВ
+# ----------------------------------------------------------------
+
+def process_frames(frames, intensity_threshold=240, cluster_dist=0.15):
+    """
+    Обрабатывает каждый кадр: фильтрация, кластеризация, вычисление центров и bounding box.
+    Возвращает список словарей для каждого кадра:
+    {
+        'time': время,
+        'clusters': [список кластеров, каждый кластер – список точек (x,y,z,intensity)],
+        'centers': [список центров (x,y,z) для каждого кластера],
+        'bboxes': [список (x_min, y_min, x_max, y_max) для каждого кластера]
+    }
+    """
+    processed = []
+    for time, points in frames:
+        # Фильтр по интенсивности
+        bright = [p for p in points if p[3] >= intensity_threshold]
+        if len(bright) < 3:
+            processed.append({'time': time, 'clusters': [], 'centers': [], 'bboxes': []})
+            continue
+        # Кластеризация
+        clusters = cluster_points(bright, cluster_dist)
+        # Фильтруем слишком маленькие кластеры (шум)
+        clusters = [c for c in clusters if len(c) >= 3]
+        # Вычисляем центры и bounding box
+        centers = [compute_center(c) for c in clusters]
+        bboxes = [bounding_box(c) for c in clusters]
+        processed.append({
+            'time': time,
+            'clusters': clusters,
+            'centers': centers,
+            'bboxes': bboxes
+        })
+    return processed
+
+# ----------------------------------------------------------------
+# 4. ТРЕКИНГ ОБЪЕКТОВ
+# ----------------------------------------------------------------
+
+def track_objects(processed_frames, match_dist=0.5, max_lost=3):
+    """
+    Сопоставляет центры между кадрами и строит траектории объектов.
+    Возвращает список объектов, каждый объект – список центров (x,y,z) по времени.
+    """
+    objects = []  # каждый объект: {'id': int, 'trajectory': [(time, (x,y,z))], 'lost': int, 'last_center': (x,y,z)}
+    next_id = 1
+
+    for frame_idx, frame_data in enumerate(processed_frames):
+        current_centers = frame_data['centers']
+        used = [False] * len(current_centers)
+
+        # Обновляем существующие объекты
+        for obj in objects:
+            best_dist = match_dist
+            best_idx = -1
+            for i, center in enumerate(current_centers):
+                if used[i]:
+                    continue
+                d = distance(obj['last_center'], center)
+                if d < best_dist:
+                    best_dist = d
+                    best_idx = i
+            if best_idx != -1:
+                # Нашли соответствие
+                center = current_centers[best_idx]
+                obj['trajectory'].append((frame_data['time'], center))
+                obj['last_center'] = center
+                obj['lost'] = 0
+                used[best_idx] = True
+            else:
+                obj['lost'] += 1
+
+        # Удаляем объекты, потерянные слишком надолго
+        objects = [obj for obj in objects if obj['lost'] <= max_lost]
+
+        # Создаём новые объекты для неиспользованных центров
+        for i, center in enumerate(current_centers):
+            if not used[i]:
+                new_obj = {
+                    'id': next_id,
+                    'trajectory': [(frame_data['time'], center)],
+                    'last_center': center,
+                    'lost': 0
+                }
+                objects.append(new_obj)
+                next_id += 1
+
+    return objects
+
+# ----------------------------------------------------------------
+# 5. ВИЗУАЛИЗАЦИЯ
+# ----------------------------------------------------------------
+
+def visualize(processed_frames, objects):
+    """
+    Отображает все точки, кластеры с bounding box, центры и траектории объектов.
+    """
+    fig, ax = plt.subplots(figsize=(12, 10))
+
+    # Цветовая карта для кадров
+    num_frames = len(processed_frames)
+    frame_colors = [plt.cm.viridis(i / max(1, num_frames-1)) for i in range(num_frames)]
+
+    # Для каждого кадра рисуем точки и кластеры
+    for f_idx, frame_data in enumerate(processed_frames):
+        points = []  # все точки кадра
+        # Собираем все точки из кластеров
+        for cl in frame_data['clusters']:
+            points.extend(cl)
+        if points:
+            xs = [p[0] for p in points]
+            ys = [p[1] for p in points]
+            # Рисуем точки кадра с прозрачностью и цветом, соответствующим времени
+            ax.scatter(xs, ys, c=[frame_colors[f_idx]]*len(xs), s=2, alpha=0.3)
+
+        # Для каждого кластера рисуем bounding box и центр
+        for cl, center, bbox in zip(frame_data['clusters'], frame_data['centers'], frame_data['bboxes']):
+            if center is None:
+                continue
+            # Рисуем точки кластера одним цветом (используем цвет кадра)
+            cl_xs = [p[0] for p in cl]
+            cl_ys = [p[1] for p in cl]
+            ax.scatter(cl_xs, cl_ys, c=[frame_colors[f_idx]]*len(cl_xs), s=10, alpha=0.7)
+
+            # Рисуем bounding box
+            x_min, y_min, x_max, y_max = bbox
+            rect = plt.Rectangle((x_min, y_min), x_max-x_min, y_max-y_min,
+                                 fill=False, edgecolor=frame_colors[f_idx], linewidth=1)
+            ax.add_patch(rect)
+
+            # Рисуем центр (красный крест)
+            ax.scatter(center[0], center[1], c='red', marker='x', s=60, linewidths=2)
+
+    # Рисуем траектории объектов
+    for obj in objects:
+        traj = obj['trajectory']
+        if len(traj) > 1:
+            times, centers = zip(*traj)
+            xs = [c[0] for c in centers]
+            ys = [c[1] for c in centers]
+            # Линия траектории
+            ax.plot(xs, ys, 'b-', linewidth=2, alpha=0.8)
+            # Начальная и конечная точки
+            ax.scatter(xs[0], ys[0], c='blue', s=80, marker='o', edgecolors='black')
+            ax.scatter(xs[-1], ys[-1], c='orange', s=80, marker='s', edgecolors='black')
+            # Подпись ID в середине
+            mid = len(traj)//2
+            ax.text(xs[mid], ys[mid]+0.1, f'ID:{obj["id"]}', fontsize=10, color='darkblue', weight='bold')
+
+    ax.set_xlabel('X (м)')
+    ax.set_ylabel('Y (м)')
+    ax.set_title('Детекция маркеров: точки, кластеры, центры и траектории')
+    ax.axis('equal')
+    ax.grid(True, alpha=0.3)
+    plt.show()
+
+# ----------------------------------------------------------------
+# 6. ГЛАВНАЯ ФУНКЦИЯ
+# ----------------------------------------------------------------
+
+def main():
+    # Настройки (измените под свои данные)
+    CSV_PATH = "path/to/your/file.csv"   # Укажите путь к вашему CSV
+    INTENSITY_THRESHOLD = 240   # Порог интенсивности (для ярких маркеров)
+    CLUSTER_DIST = 0.15         # Расстояние для кластеризации (метры)
+    MATCH_DIST = 0.5            # Расстояние для сопоставления между кадрами
+    MAX_LOST = 3                # Сколько кадров можно терять объект
+
+    print("Чтение CSV...")
+    frames = read_livox_csv(CSV_PATH)
+    print(f"Найдено кадров: {len(frames)}")
+
+    print("Обработка кадров...")
+    processed = process_frames(frames, INTENSITY_THRESHOLD, CLUSTER_DIST)
+
+    print("Трекинг объектов...")
+    objects = track_objects(processed, MATCH_DIST, MAX_LOST)
+
+    print(f"Отслеживаемых объектов: {len(objects)}")
+    for obj in objects:
+        print(f"  ID {obj['id']}: {len(obj['trajectory'])} позиций")
+
+    print("Визуализация...")
+    visualize(processed, objects)
+
+if __name__ == "__main__":
+    main()
