@@ -1,0 +1,49 @@
+def read_livox_csv(file_path, frame_duration=0.2):
+    """
+    Читает CSV-файл с колонками: время, x, y, z, интенсивность.
+    Время в формате 'H:M:S.mmm'.
+    Группирует точки по временным интервалам длительностью frame_duration (сек).
+    Возвращает список кадров: каждый кадр — (время_начала_интервала, список_точек (x,y,z,intensity)).
+    """
+    all_points = []  # (time_sec, x, y, z, intensity)
+    with open(file_path, 'r') as f:
+        reader = csv.reader(f)
+        next(reader, None)  # пропускаем заголовок
+        for row in reader:
+            if len(row) < 5:
+                continue
+            try:
+                time_str = row[0].strip()
+                time_sec = parse_time(time_str)
+                if time_sec is None:
+                    continue
+                x = float(row[1])
+                y = float(row[2])
+                z = float(row[3])
+                intensity = float(row[4])
+                all_points.append((time_sec, x, y, z, intensity))
+            except ValueError:
+                continue
+
+    if not all_points:
+        return []
+
+    # Сортируем точки по времени (обязательно для группировки)
+    all_points.sort(key=lambda p: p[0])
+
+    # Определяем минимальное и максимальное время
+    min_time = all_points[0][0]
+    max_time = all_points[-1][0]
+
+    # Создаём кадры с шагом frame_duration
+    frames = []
+    start = min_time
+    while start <= max_time:
+        end = start + frame_duration
+        # Выбираем точки, попадающие в интервал [start, end)
+        frame_points = [(x, y, z, intensity) for (t, x, y, z, intensity) in all_points if start <= t < end]
+        # Сохраняем кадр с временем начала интервала
+        frames.append((start, frame_points))
+        start = end
+
+    return frames
